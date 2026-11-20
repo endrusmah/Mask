@@ -1,0 +1,56 @@
+PROPRIETARY SOFTWARE LICENSE — ALL RIGHTS RESERVED
+
+Copyright (c) 2026 endrusmah
+All rights reserved.
+
+This software, including all source code, header files, build scripts, user
+interface designs, architecture documents, assets, and compiled binaries
+comprising the Mask project (collectively, the "Software"), is the exclusive
+proprietary property of endrusmah (the "Author").
+
+STRICT RESTRICTIONS:
+
+1. No Commercial Use or Sale:
+   You may NOT sell, license, sublicense, rent, lease, lend, distribute for a
+   fee, monetize, bundle with commercial products, or otherwise exploit the
+   Software or any part of it for commercial or financial gain.
+
+2. No Modification or Derivative Works:
+   You may NOT modify, adapt, translate, reverse-engineer, decompile,
+   disassemble, patch, fork for derivative distribution, or create derivative
+   works based upon the Software or any portion thereof.
+
+3. No Reuse in Other Projects:
+   You may NOT copy, extract, import, embed, link, or reuse any source code,
+   algorithms, data structures, UI components, or assets from this Software
+   within any other software, library, script, product, or project (whether
+   open-source, private, academic, or commercial).
+
+4. No Redistribution:
+   You may NOT redistribute, mirror, publish, upload, or share copies of the
+   Software, in whole or in part, in source or binary form, without prior
+   explicit written permission from endrusmah.
+
+5. Exclusive Rights Retained by Author:
+   The Author (endrusmah) retains sole and exclusive ownership, copyright,
+   intellectual property rights, and all permissions to use, modify, sell,
+   relicense, or distribute the Software without limitation.
+
+Limited viewing of this repository on GitHub does NOT grant any license, right,
+or permission to use, copy, modify, or incorporate the Software unless
+expressly authorized in writing by endrusmah.
+
+-------------------------------------------------------------------------------
+DISCLAIMER OF WARRANTY
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHOR (endrusmah) BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING
+FROM OR IN CONNECTION WITH THE SOFTWARE.
+
+-------------------------------------------------------------------------------
+THIRD-PARTY COMPONENT NOTICE
+The bundled third-party binary `lib/HIDMaestro.Core.dll` (HIDMaestro v2.1.0) is
+NOT authored by endrusmah, remains the property of its respective copyright
+holder(s) (hifihedgehog/HIDMaestro), and is governed exclusively by its own
+applicable third-party license terms.

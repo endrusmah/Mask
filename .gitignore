@@ -1,0 +1,35 @@
+# Build outputs
+build/
+out/
+x64/
+x86/
+Debug/
+Release/
+*.pdb
+*.ilk
+*.obj
+*.lib
+*.exp
+*.exe
+
+# .NET bridge build artifacts (runtime outputs copied via CMake post-build)
+src/bridge/bin/
+src/bridge/obj/
+
+# Backups & IDE state
+backup_before_upgrade/
+backup_before_upgrade_2/
+.vs/
+*.user
+*.suo
+*.log
+
+# Local user profiles & runtime data files
+*.bin
+*.bak
+*.tmp
+profiles*.bin
+sequences*.bin
+triggers*.bin
+remaps*.bin
+settings.bin
