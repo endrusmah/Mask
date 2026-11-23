@@ -1,0 +1,42 @@
+#include <winresrc.h>
+#include "resource.h"
+
+#pragma code_page(65001)
+
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+// Primary application icon (16, 24, 32, 48, 64, 128, 256px)
+IDI_MASK_ICON ICON "../assets/mask.ico"
+
+VS_VERSION_INFO VERSIONINFO
+    FILEVERSION     MASK_VER_MAJOR,MASK_VER_MINOR,MASK_VER_PATCH,MASK_VER_BUILD
+    PRODUCTVERSION  MASK_VER_MAJOR,MASK_VER_MINOR,MASK_VER_PATCH,MASK_VER_BUILD
+    FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+    FILEFLAGS       VS_FF_DEBUG
+#else
+    FILEFLAGS       0x0L
+#endif
+    FILEOS          VOS_NT_WINDOWS32
+    FILETYPE        VFT_APP
+    FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "Mask"
+            VALUE "FileDescription",  "Mask Deterministic Input Engine"
+            VALUE "FileVersion",      MASK_VER_STR
+            VALUE "InternalName",     "MaskEngine"
+            VALUE "LegalCopyright",   "Copyright (c) Mask"
+            VALUE "OriginalFilename", "MaskEngine.exe"
+            VALUE "ProductName",      "Mask"
+            VALUE "ProductVersion",   MASK_VER_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

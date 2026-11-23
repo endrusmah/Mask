@@ -36,9 +36,13 @@ using mask::core::MacroMode;
 using mask::core::ComplexSequenceConfig;
 using mask::core::ComplexStep;
 using mask::core::ComplexStepKind;
+using mask::core::ComplexConditionKind;
 using mask::core::ColorTriggerConfig;
 using mask::core::ColorTriggerMode;
 using mask::core::ColorTriggerActionKind;
+using mask::core::ColorTriggerMatchRule;
+using mask::core::GetTriggerMatchRule;
+using mask::core::SetTriggerMatchRule;
 using mask::core::RemapRuleConfig;
 using mask::core::RemapLayerAction;
 using mask::core::RemapUnlockPolicy;
@@ -222,8 +226,72 @@ struct KeyName {
         case ComplexStepKind::RunCommand:    return L"Run command";
         case ComplexStepKind::SetLayer:      return L"Switch layer";
         case ComplexStepKind::ToggleMacro:   return L"Toggle macro";
+        case ComplexStepKind::IfCheck:       return L"If check";
+        case ComplexStepKind::ElseBranch:    return L"Else";
+        case ComplexStepKind::EndIf:         return L"End if";
         default:                             return L"Step";
     }
+}
+
+[[nodiscard]] inline const wchar_t* ConditionKindName(ComplexConditionKind cond) noexcept {
+    switch (cond) {
+        case ComplexConditionKind::KeyHeld:       return L"Key held";
+        case ComplexConditionKind::ColorMatches:  return L"Pixel color";
+        case ComplexConditionKind::LayerIs:       return L"Layer";
+        case ComplexConditionKind::UnlockStateIs: return L"Lock state";
+        case ComplexConditionKind::MacroActive:   return L"Macro on";
+        case ComplexConditionKind::RandomChance:  return L"Random %";
+        default:                                  return L"Key held";
+    }
+}
+
+[[nodiscard]] inline int CountStepKind(const ComplexSequenceConfig& seq, ComplexStepKind target) noexcept {
+    const int cnt = std::clamp<int>(seq.stepCount, 0, kComplexStepMax);
+    int total = 0;
+    for (int i = 0; i < cnt; ++i) {
+        if (seq.steps[i].kind == static_cast<uint8_t>(target)) {
+            ++total;
+        }
+    }
+    return total;
+}
+
+[[nodiscard]] inline int FindMatchingEndIf(const ComplexSequenceConfig& seq, int ifIndex) noexcept {
+    const int cnt = std::clamp<int>(seq.stepCount, 0, kComplexStepMax);
+    int depth = 0;
+    for (int i = ifIndex + 1; i < cnt; ++i) {
+        const auto k = static_cast<ComplexStepKind>(seq.steps[i].kind);
+        if (k == ComplexStepKind::IfCheck) {
+            ++depth;
+        } else if (k == ComplexStepKind::EndIf) {
+            if (depth == 0) {
+                return i;
+            }
+            --depth;
+        }
+    }
+    return -1;
+}
+
+[[nodiscard]] inline bool HasElseInIfBlock(const ComplexSequenceConfig& seq, int ifIndex) noexcept {
+    const int cnt = std::clamp<int>(seq.stepCount, 0, kComplexStepMax);
+    int depth = 0;
+    for (int i = ifIndex + 1; i < cnt; ++i) {
+        const auto k = static_cast<ComplexStepKind>(seq.steps[i].kind);
+        if (k == ComplexStepKind::IfCheck) {
+            ++depth;
+        } else if (k == ComplexStepKind::ElseBranch) {
+            if (depth == 0) {
+                return true;
+            }
+        } else if (k == ComplexStepKind::EndIf) {
+            if (depth == 0) {
+                return false;
+            }
+            --depth;
+        }
+    }
+    return false;
 }
 
 [[nodiscard]] inline const wchar_t* SeqTriggerModeName(uint8_t mode) noexcept {
@@ -296,6 +364,51 @@ inline void DescribeComplexStep(const ComplexStep& st, wchar_t* buf, size_t n) n
             break;
         case ComplexStepKind::ToggleMacro:
             std::swprintf(buf, n, L"Toggle macro #%u", static_cast<unsigned>((st.param % mask::core::kMaxMacroSlots) + 1U));
+            break;
+        case ComplexStepKind::IfCheck: {
+            const bool neg = mask::core::IsStepConditionNegated(st);
+            switch (mask::core::GetStepConditionKind(st)) {
+                case ComplexConditionKind::KeyHeld:
+                    std::swprintf(buf, n, L"If %ls is %ls",
+                                  st.vk != 0U ? NameOf(st.vk).text : L"(pick key)",
+                                  neg ? L"not held" : L"held");
+                    break;
+                case ComplexConditionKind::ColorMatches:
+                    std::swprintf(buf, n,
+                                  neg ? L"If color isn\u2019t at (%d, %d)" : L"If color matches at (%d, %d)",
+                                  static_cast<int>(st.x), static_cast<int>(st.y));
+                    break;
+                case ComplexConditionKind::LayerIs:
+                    std::swprintf(buf, n,
+                                  neg ? L"If layer isn\u2019t %ls" : L"If layer is %ls",
+                                  LayerName(static_cast<uint8_t>(st.param)));
+                    break;
+                case ComplexConditionKind::UnlockStateIs: {
+                    const bool effLocked = (st.param != 0U) ^ neg;
+                    wcscpy_s(buf, n, effLocked ? L"If controls are locked" : L"If controls are unlocked");
+                    break;
+                }
+                case ComplexConditionKind::MacroActive:
+                    std::swprintf(buf, n,
+                                  neg ? L"If Macro #%u isn\u2019t running" : L"If Macro #%u is running",
+                                  static_cast<unsigned>((st.param % mask::core::kMaxMacroSlots) + 1U));
+                    break;
+                case ComplexConditionKind::RandomChance:
+                    std::swprintf(buf, n,
+                                  neg ? L"If %u%% chance misses" : L"If %u%% chance hits",
+                                  static_cast<unsigned>((std::min)(st.param, 100U)));
+                    break;
+                default:
+                    wcscpy_s(buf, n, L"If check");
+                    break;
+            }
+            break;
+        }
+        case ComplexStepKind::ElseBranch:
+            wcscpy_s(buf, n, L"Otherwise (Else)");
+            break;
+        case ComplexStepKind::EndIf:
+            wcscpy_s(buf, n, L"End if block");
             break;
         default:
             wcscpy_s(buf, n, L"Step");
@@ -384,6 +497,22 @@ inline void DescribeRemapRule(const RemapRuleConfig& r, wchar_t* buf, size_t n) 
     }
 }
 
+[[nodiscard]] inline const wchar_t* TriggerModeName(ColorTriggerMode mode) noexcept {
+    switch (mode) {
+        case ColorTriggerMode::ColorChanged: return L"Color Change";
+        case ColorTriggerMode::MatchColor:
+        default:                             return L"Color Match";
+    }
+}
+
+[[nodiscard]] inline const wchar_t* TriggerMatchRuleName(ColorTriggerMatchRule rule) noexcept {
+    switch (rule) {
+        case ColorTriggerMatchRule::ZoneAverage: return L"Zone Average";
+        case ColorTriggerMatchRule::AnyPixel:
+        default:                                 return L"Any Pixel";
+    }
+}
+
 [[nodiscard]] inline const wchar_t* ToleranceWord(uint8_t tol) noexcept {
     if (tol <= 12U) return L"Very strict";
     if (tol <= 26U) return L"Strict";
@@ -402,8 +531,12 @@ inline void DescribeColorTrigger(const ColorTriggerConfig& t, wchar_t* buf, size
                       monNum, static_cast<int>(t.sampleX), static_cast<int>(t.sampleY));
     }
 
-    const wchar_t* modeStr = (t.mode == static_cast<uint8_t>(ColorTriggerMode::ColorChanged))
-        ? L"for any color change" : L"for this color";
+    const wchar_t* modeStr = (static_cast<ColorTriggerMode>(t.mode) == ColorTriggerMode::ColorChanged)
+        ? L"for any color change"
+        : L"for this color";
+    const wchar_t* ruleStr = (GetTriggerMatchRule(t) == ColorTriggerMatchRule::ZoneAverage && t.sampleRadius > 0U)
+        ? L" (zone average)"
+        : L"";
 
     wchar_t armBuf[48]{};
     if (t.armMode == 1U) {
@@ -412,7 +545,7 @@ inline void DescribeColorTrigger(const ColorTriggerConfig& t, wchar_t* buf, size
         std::swprintf(armBuf, std::size(armBuf), L" when toggled with %ls", NameOf(t.armVk).text);
     }
 
-    wchar_t actBuf[48]{};
+    wchar_t actBuf[56]{};
     switch (static_cast<ColorTriggerActionKind>(t.actionKind)) {
         case ColorTriggerActionKind::ClickKey:
             std::swprintf(actBuf, std::size(actBuf), L"clicks %ls", NameOf(t.actionVk).text);
@@ -430,7 +563,7 @@ inline void DescribeColorTrigger(const ColorTriggerConfig& t, wchar_t* buf, size
             wcscpy_s(actBuf, L"runs an action");
             break;
     }
-    std::swprintf(buf, n, L"Watches %ls %ls%ls, then %ls.", spotBuf, modeStr, armBuf, actBuf);
+    std::swprintf(buf, n, L"Watches %ls %ls%ls%ls, then %ls.", spotBuf, modeStr, ruleStr, armBuf, actBuf);
 }
 
 // =====================================================================================
@@ -887,6 +1020,45 @@ inline void Sanitize(MacroConfig& s, int index) noexcept {
     }
 }
 
+inline void SanitizeTrigger(ColorTriggerConfig& c, int index) noexcept {
+    auto rawBool = [](const bool& b) noexcept {
+        uint8_t raw = 0;
+        std::memcpy(&raw, &b, 1);
+        return raw != 0;
+    };
+    c.slotIndex = static_cast<uint8_t>(index);
+    c.inUse     = rawBool(c.inUse);
+    c.enabled   = c.inUse ? rawBool(c.enabled) : false;
+    if (c.mode > static_cast<uint8_t>(ColorTriggerMode::ColorChanged)) {
+        c.mode = static_cast<uint8_t>(ColorTriggerMode::MatchColor);
+    }
+    SetTriggerMatchRule(c, GetTriggerMatchRule(c));
+    if (c.actionKind > static_cast<uint8_t>(ColorTriggerActionKind::RunComplexSeq)) {
+        c.actionKind = static_cast<uint8_t>(ColorTriggerActionKind::ClickKey);
+    }
+    if (c.armMode > 2U) c.armMode = 0U;
+    if (c.monitorIndex >= static_cast<uint8_t>(mask::triggers::kMaxMonitors)) c.monitorIndex = 0U;
+    if (c.sampleRadius > 7U) c.sampleRadius = 7U;
+    c.armVk      = static_cast<uint16_t>(c.armVk & 0xFFU);
+    c.actionVk   = static_cast<uint16_t>(c.actionVk & 0xFFU);
+    c.delayMs    = std::min<uint32_t>(c.delayMs, 10'000U);
+    c.holdMs     = std::min<uint32_t>(c.holdMs, 10'000U);
+    c.cooldownMs = std::min<uint32_t>(c.cooldownMs, 60'000U);
+    c.reserved[1] = 0U;
+    c.reserved[2] = 0U;
+    if (c.actionKind == static_cast<uint8_t>(ColorTriggerActionKind::RunMacroSlot) &&
+        c.linkedIndex >= static_cast<uint8_t>(kSlotCount)) {
+        c.linkedIndex = 0U;
+    } else if (c.actionKind == static_cast<uint8_t>(ColorTriggerActionKind::RunComplexSeq) &&
+               c.linkedIndex >= static_cast<uint8_t>(kComplexSeqCount)) {
+        c.linkedIndex = 0U;
+    }
+    c.name[std::size(c.name) - 1U] = L'\0';
+    if (c.name[0] == L'\0') {
+        std::swprintf(c.name, std::size(c.name), L"Color Trigger %d", index + 1);
+    }
+}
+
 } // namespace storage
 
 // =====================================================================================
@@ -981,10 +1153,45 @@ struct AppModel {
 
     // ---- Device & Monitor Inventory -----------------------------------------------
 
-    void RefreshDevicesAndMonitors(const mask::remap::RemapEngine* remapEngine = nullptr) noexcept {
-        physicalDeviceCount = mask::input::CopyPhysicalDeviceInventory(physicalDevices);
-        if (remapEngine != nullptr) {
-            monitorCount = remapEngine->GetMonitors(monitors);
+    void RefreshDevicesAndMonitors(const mask::remap::RemapEngine* remap = nullptr) noexcept {
+        physicalDeviceCount = 0;
+        physicalDevices = {};
+
+        // 1. Immediate Raw Input device list from RemapEngine (available right at startup)
+        if (remap != nullptr) {
+            std::array<mask::input::PhysicalDeviceInfo, mask::input::kMaxPhysicalGameInputDevices> rawDevs{};
+            const int rawCnt = std::clamp<int>(remap->GetRawDevices(rawDevs), 0, static_cast<int>(physicalDevices.size()));
+            for (int i = 0; i < rawCnt; ++i) {
+                physicalDevices[static_cast<size_t>(physicalDeviceCount++)] = rawDevs[static_cast<size_t>(i)];
+            }
+        }
+
+        // 2. Merge any active GameInput physical devices not already present (dedup by deviceIdBytes or VID/PID+kind)
+        std::array<mask::input::PhysicalDeviceInfo, mask::input::kMaxPhysicalGameInputDevices> giDevs{};
+        const int giCnt = std::clamp<int>(mask::input::CopyPhysicalDeviceInventory(giDevs), 0, static_cast<int>(giDevs.size()));
+        for (int g = 0; g < giCnt && physicalDeviceCount < static_cast<int>(physicalDevices.size()); ++g) {
+            const auto& d = giDevs[static_cast<size_t>(g)];
+            bool duplicate = false;
+            for (int e = 0; e < physicalDeviceCount; ++e) {
+                const auto& existing = physicalDevices[static_cast<size_t>(e)];
+                if (std::memcmp(existing.deviceIdBytes, d.deviceIdBytes, sizeof(existing.deviceIdBytes)) == 0) {
+                    duplicate = true;
+                    break;
+                }
+                const bool sameKind = (existing.isKeyboard && d.isKeyboard) || (existing.isMouse && d.isMouse);
+                if (sameKind && d.vendorId != 0U && existing.vendorId == d.vendorId && existing.productId == d.productId) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) {
+                physicalDevices[static_cast<size_t>(physicalDeviceCount++)] = d;
+            }
+        }
+
+        monitorCount = 0;
+        if (remap != nullptr) {
+            monitorCount = remap->GetMonitors(monitors);
         }
         if (monitorCount <= 0) {
             std::array<mask::triggers::MonitorInfoEntry, mask::triggers::kMaxMonitors> tmp{};
@@ -1039,16 +1246,30 @@ struct AppModel {
             ? selectedIndex : std::clamp(selectedSlot, 0, kSlotCount - 1);
         return slots[idx];
     }
+    [[nodiscard]] const MacroConfig& Selected() const noexcept {
+        const int idx = (selectedKind == ItemKind::Macro && selectedIndex >= 0 && selectedIndex < kSlotCount)
+            ? selectedIndex : std::clamp(selectedSlot, 0, kSlotCount - 1);
+        return slots[idx];
+    }
 
     [[nodiscard]] ComplexSequenceConfig& SelectedSeq() noexcept {
+        return sequences[std::clamp(selectedIndex, 0, kComplexSeqCount - 1)];
+    }
+    [[nodiscard]] const ComplexSequenceConfig& SelectedSeq() const noexcept {
         return sequences[std::clamp(selectedIndex, 0, kComplexSeqCount - 1)];
     }
 
     [[nodiscard]] ColorTriggerConfig& SelectedTrigger() noexcept {
         return triggers[std::clamp(selectedIndex, 0, kColorTriggerCount - 1)];
     }
+    [[nodiscard]] const ColorTriggerConfig& SelectedTrigger() const noexcept {
+        return triggers[std::clamp(selectedIndex, 0, kColorTriggerCount - 1)];
+    }
 
     [[nodiscard]] RemapRuleConfig& SelectedRemap() noexcept {
+        return remaps[std::clamp(selectedIndex, 0, kRemapRuleCount - 1)];
+    }
+    [[nodiscard]] const RemapRuleConfig& SelectedRemap() const noexcept {
         return remaps[std::clamp(selectedIndex, 0, kRemapRuleCount - 1)];
     }
 
@@ -1188,6 +1409,7 @@ struct AppModel {
         t.enabled      = false;
         t.inUse        = false;
         t.mode         = static_cast<uint8_t>(ColorTriggerMode::MatchColor);
+        SetTriggerMatchRule(t, ColorTriggerMatchRule::AnyPixel);
         t.actionKind   = static_cast<uint8_t>(ColorTriggerActionKind::ClickKey);
         t.armMode      = 0U;
         t.r            = 255U;
@@ -1205,6 +1427,51 @@ struct AppModel {
         t.cooldownMs   = 80U;
         t.linkedIndex  = 0U;
         std::swprintf(t.name, std::size(t.name), L"Color Trigger %d", i + 1);
+    }
+
+    [[nodiscard]] int AddDefaultTrigger() noexcept {
+        const int target = FindFirstFreeTrigger();
+        if (target < 0) return -1;
+        ResetTrigger(target);
+        triggers[target].inUse = true;
+        return target;
+    }
+
+    [[nodiscard]] int CreateNewMacro() noexcept {
+        const int target = FindFirstFreeSlot();
+        if (target < 0) return -1;
+        ResetSlot(target);
+        slots[target].reserved[0] = 1;
+        wcscpy_s(slots[target].name, L"New macro");
+        return target;
+    }
+
+    [[nodiscard]] int CreateNewSequence() noexcept {
+        const int target = FindFirstFreeSeq();
+        if (target < 0) return -1;
+        ResetSequence(target);
+        auto& seq = sequences[target];
+        seq.inUse = true;
+        seq.stepCount = 2;
+        seq.steps[0].kind = static_cast<uint8_t>(ComplexStepKind::KeyClick);
+        seq.steps[0].vk = '1';
+        seq.steps[0].durationMs = 25;
+        seq.steps[1].kind = static_cast<uint8_t>(ComplexStepKind::WaitMs);
+        seq.steps[1].durationMs = 100;
+        selectedSeqStep = 0;
+        return target;
+    }
+
+    [[nodiscard]] int CreateNewTrigger() noexcept {
+        return AddDefaultTrigger();
+    }
+
+    [[nodiscard]] int CreateNewRemap() noexcept {
+        const int target = FindFirstFreeRemap();
+        if (target < 0) return -1;
+        ResetRemap(target);
+        remaps[target].inUse = true;
+        return target;
     }
 
     void ResetRemap(int i) noexcept {
@@ -1307,9 +1574,21 @@ struct AppModel {
             if (static_cast<MacroMode>(s.mode) == MacroMode::SocdPair) watch(s.outputVk);
         }
         for (const auto& q : sequences) {
-            if (!q.inUse || !q.enabled || q.triggerVk == 0) continue;
-            anyEnabled = true;
-            watch(q.triggerVk);
+            if (!q.inUse || !q.enabled) continue;
+            if (q.triggerVk != 0U) {
+                anyEnabled = true;
+                watch(q.triggerVk);
+            }
+            const int cnt = std::clamp<int>(q.stepCount, 0, kComplexStepMax);
+            for (int si = 0; si < cnt; ++si) {
+                const auto& st = q.steps[si];
+                if (st.kind == static_cast<uint8_t>(ComplexStepKind::IfCheck) &&
+                    mask::core::GetStepConditionKind(st) == ComplexConditionKind::KeyHeld &&
+                    st.vk != 0U) {
+                    anyEnabled = true;
+                    watch(st.vk);
+                }
+            }
         }
         for (const auto& t : triggers) {
             if (!t.inUse || !t.enabled) continue;
@@ -1572,6 +1851,8 @@ struct AppModel {
         return result;
     }
 };
+
+using UiState = AppModel;
 
 inline AppModel g_Ui{};
 inline mask::ui::UiAnimator g_Animator{};

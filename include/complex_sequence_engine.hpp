@@ -1,11 +1,9 @@
 #pragma once
 
 // Multi-Step Workflow / Complex Sequence Engine (up to 16 concurrent sequences, 128 steps each).
-// Runs on a dedicated event-driven background thread (0.00% CPU while idle) using a high-resolution
-// waitable timer + auto-reset wake event, serializing all hardware outputs through EngineSharedState::auxOutputQueue.
-
-#include "core_contracts.hpp"
-#include "input_pipeline.hpp"
+// Runs on a dedicated event-driven background thread (0.00% CPU while idle) using TimingEngine's
+// persistent high-resolution waitable timer + auto-reset wake event + Eco adaptive hybrid tail,
+// serializing all hardware outputs through EngineSharedState::auxOutputQueue.
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -13,6 +11,11 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+
+#include "core_contracts.hpp"
+#include "input_pipeline.hpp"
+#include "timing_engine.hpp"
+
 #include <windows.h>
 #include <shellapi.h>
 #include <objbase.h>
@@ -88,8 +91,16 @@ namespace detail {
 }
 
 inline void SanitizeComplexStep(mask::core::ComplexStep& s) noexcept {
-    if (s.kind > static_cast<uint8_t>(mask::core::ComplexStepKind::ToggleMacro)) {
+    if (s.kind > static_cast<uint8_t>(mask::core::ComplexStepKind::EndIf)) {
         s.kind = static_cast<uint8_t>(mask::core::ComplexStepKind::WaitMs);
+    }
+    if (s.kind == static_cast<uint8_t>(mask::core::ComplexStepKind::IfCheck)) {
+        s.flags = static_cast<uint8_t>(
+            s.flags & (mask::core::kComplexCondMask | mask::core::kComplexFlagNegate));
+        if ((s.flags & mask::core::kComplexCondMask) >
+            static_cast<uint8_t>(mask::core::ComplexConditionKind::RandomChance)) {
+            s.flags = static_cast<uint8_t>(s.flags & ~mask::core::kComplexCondMask);
+        }
     }
     s.vk = static_cast<uint16_t>(s.vk & 0xFFU);
     if (s.durationMs > 3'600'000U) {
@@ -328,23 +339,10 @@ public:
         }
 
         wakeEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        waitableTimer_ = CreateWaitableTimerExW(
-            nullptr,
-            nullptr,
-            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
-            TIMER_ALL_ACCESS
-        );
-        if (waitableTimer_ == nullptr) {
-            waitableTimer_ = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
-        }
     }
 
     ~ComplexSequenceEngine() noexcept {
         Stop();
-        if (waitableTimer_ != nullptr) {
-            CloseHandle(waitableTimer_);
-            waitableTimer_ = nullptr;
-        }
         if (wakeEvent_ != nullptr) {
             CloseHandle(wakeEvent_);
             wakeEvent_ = nullptr;
@@ -361,17 +359,6 @@ public:
         stopRequested_.store(false, std::memory_order_release);
         if (wakeEvent_ == nullptr) {
             wakeEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        }
-        if (waitableTimer_ == nullptr) {
-            waitableTimer_ = CreateWaitableTimerExW(
-                nullptr,
-                nullptr,
-                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
-                TIMER_ALL_ACCESS
-            );
-            if (waitableTimer_ == nullptr) {
-                waitableTimer_ = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
-            }
         }
         workerThread_ = CreateThread(nullptr, 0, &ComplexSequenceEngine::ThreadEntry, this, 0, nullptr);
         if (workerThread_ == nullptr) {
@@ -519,6 +506,192 @@ public:
         return currentStepIndices_[index].load(std::memory_order_acquire);
     }
 
+    /**
+     * @brief Deterministic offline verification of ComplexSequenceEngine conditionals & loop nesting.
+     */
+    [[nodiscard]] static bool RunControlFlowSelfTest() noexcept {
+        std::unique_ptr<mask::core::EngineSharedState> state(new (std::nothrow) mask::core::EngineSharedState{});
+        if (!state) {
+            return false;
+        }
+
+        static int s_mockColorCalls = 0;
+        const PixelSampleFn mockSampler = [](int32_t, int32_t, uint8_t& r, uint8_t& g, uint8_t& b) noexcept -> bool {
+            ++s_mockColorCalls;
+            if (s_mockColorCalls == 1 || s_mockColorCalls == 3) {
+                r = 10U; g = 200U; b = 30U;
+            } else {
+                r = 240U; g = 15U; b = 15U;
+            }
+            return true;
+        };
+
+        ComplexSequenceEngine engine(*state, mockSampler);
+        if (!engine.workerConfigs_) {
+            return false;
+        }
+
+        auto runCase = [&](const mask::core::ComplexSequenceConfig& cfg,
+                           const uint16_t* expectedVks,
+                           size_t expectedCount) noexcept -> bool {
+            mask::core::AuxOutputCommand trash{};
+            while (state->auxOutputQueue.try_pop(trash)) {}
+
+            (*engine.workerConfigs_)[0] = cfg;
+            detail::SanitizeComplexSequenceConfig((*engine.workerConfigs_)[0], 0);
+            engine.StartSequenceSlot(0, false);
+
+            for (int guard = 0; guard < 16 && engine.runtime_[0].active; ++guard) {
+                (void)engine.AdvanceSequence(0, NowQpc());
+            }
+            if (engine.runtime_[0].active) {
+                return false;
+            }
+
+            std::array<uint16_t, 32> actual{};
+            size_t actualCount = 0;
+            mask::core::AuxOutputCommand cmd{};
+            while (state->auxOutputQueue.try_pop(cmd)) {
+                if (cmd.kind == static_cast<uint8_t>(mask::core::AuxActionKind::KeyClick)) {
+                    if (actualCount >= actual.size()) {
+                        return false;
+                    }
+                    actual[actualCount++] = cmd.vk;
+                }
+            }
+
+            if (actualCount != expectedCount) {
+                return false;
+            }
+            for (size_t i = 0; i < expectedCount; ++i) {
+                if (actual[i] != expectedVks[i]) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        auto makeKeyClick = [](uint16_t vk) noexcept {
+            mask::core::ComplexStep st{};
+            st.kind = static_cast<uint8_t>(mask::core::ComplexStepKind::KeyClick);
+            st.vk = vk;
+            st.durationMs = 0U;
+            return st;
+        };
+        auto makeCond = [](mask::core::ComplexConditionKind cond, bool neg) noexcept {
+            mask::core::ComplexStep st{};
+            st.kind = static_cast<uint8_t>(mask::core::ComplexStepKind::IfCheck);
+            mask::core::SetStepConditionKind(st, cond);
+            mask::core::SetStepConditionNegated(st, neg);
+            return st;
+        };
+
+        // Case 1: If (LayerIs 1) -> Click 'A' -> Else -> Click 'B' -> EndIf
+        {
+            mask::core::ComplexSequenceConfig cfg{};
+            cfg.enabled = true;
+            cfg.inUse = true;
+            cfg.stepCount = 5;
+            cfg.steps[0] = makeCond(mask::core::ComplexConditionKind::LayerIs, false);
+            cfg.steps[0].param = 1U;
+            cfg.steps[1] = makeKeyClick('A');
+            cfg.steps[2].kind = static_cast<uint8_t>(mask::core::ComplexStepKind::ElseBranch);
+            cfg.steps[3] = makeKeyClick('B');
+            cfg.steps[4].kind = static_cast<uint8_t>(mask::core::ComplexStepKind::EndIf);
+
+            state->activeRemapLayer.store(1U, std::memory_order_release);
+            const uint16_t exp1[1] = { 'A' };
+            if (!runCase(cfg, exp1, 1U)) return false;
+
+            state->activeRemapLayer.store(0U, std::memory_order_release);
+            const uint16_t exp0[1] = { 'B' };
+            if (!runCase(cfg, exp0, 1U)) return false;
+        }
+
+        // Case 2: Negated If (NOT KeyHeld 'K') -> Click 'C' -> EndIf
+        {
+            mask::core::ComplexSequenceConfig cfg{};
+            cfg.enabled = true;
+            cfg.inUse = true;
+            cfg.stepCount = 3;
+            cfg.steps[0] = makeCond(mask::core::ComplexConditionKind::KeyHeld, true);
+            cfg.steps[0].vk = 'K';
+            cfg.steps[1] = makeKeyClick('C');
+            cfg.steps[2].kind = static_cast<uint8_t>(mask::core::ComplexStepKind::EndIf);
+
+            state->physicalKeyState['K'].store(0U, std::memory_order_release);
+            state->syntheticHeldState['K'].store(0U, std::memory_order_release);
+            const uint16_t expOpen[1] = { 'C' };
+            if (!runCase(cfg, expOpen, 1U)) return false;
+
+            state->physicalKeyState['K'].store(1U, std::memory_order_release);
+            const bool okHeld = runCase(cfg, nullptr, 0U);
+            state->physicalKeyState['K'].store(0U, std::memory_order_release);
+            if (!okHeld) return false;
+        }
+
+        // Case 3: LoopStart(3) -> If (ColorMatches) -> Click 'D' -> Else -> Click 'E' -> EndIf -> LoopEnd
+        {
+            s_mockColorCalls = 0;
+            mask::core::ComplexSequenceConfig cfg{};
+            cfg.enabled = true;
+            cfg.inUse = true;
+            cfg.stepCount = 7;
+            cfg.steps[0].kind = static_cast<uint8_t>(mask::core::ComplexStepKind::LoopStart);
+            cfg.steps[0].param = 3U;
+            cfg.steps[1] = makeCond(mask::core::ComplexConditionKind::ColorMatches, false);
+            cfg.steps[1].r = 10U; cfg.steps[1].g = 200U; cfg.steps[1].b = 30U; cfg.steps[1].tolerance = 10U;
+            cfg.steps[2] = makeKeyClick('D');
+            cfg.steps[3].kind = static_cast<uint8_t>(mask::core::ComplexStepKind::ElseBranch);
+            cfg.steps[4] = makeKeyClick('E');
+            cfg.steps[5].kind = static_cast<uint8_t>(mask::core::ComplexStepKind::EndIf);
+            cfg.steps[6].kind = static_cast<uint8_t>(mask::core::ComplexStepKind::LoopEnd);
+
+            const uint16_t expLoop[3] = { 'D', 'E', 'D' };
+            if (!runCase(cfg, expLoop, 3U)) return false;
+        }
+
+        // Case 4: Nested If (UnlockStateIs Locked -> false) -> If (LayerIs 0 -> true) -> Click 'X' -> Else -> Click 'Y' -> EndIf -> Else -> Click 'Z' -> EndIf
+        {
+            state->remapUnlocked.store(true, std::memory_order_release);
+            state->activeRemapLayer.store(0U, std::memory_order_release);
+            mask::core::ComplexSequenceConfig cfg{};
+            cfg.enabled = true;
+            cfg.inUse = true;
+            cfg.stepCount = 9;
+            cfg.steps[0] = makeCond(mask::core::ComplexConditionKind::UnlockStateIs, false);
+            cfg.steps[0].param = 1U; // Locked
+            cfg.steps[1] = makeCond(mask::core::ComplexConditionKind::LayerIs, false);
+            cfg.steps[1].param = 0U;
+            cfg.steps[2] = makeKeyClick('X');
+            cfg.steps[3].kind = static_cast<uint8_t>(mask::core::ComplexStepKind::ElseBranch);
+            cfg.steps[4] = makeKeyClick('Y');
+            cfg.steps[5].kind = static_cast<uint8_t>(mask::core::ComplexStepKind::EndIf);
+            cfg.steps[6].kind = static_cast<uint8_t>(mask::core::ComplexStepKind::ElseBranch);
+            cfg.steps[7] = makeKeyClick('Z');
+            cfg.steps[8].kind = static_cast<uint8_t>(mask::core::ComplexStepKind::EndIf);
+
+            const uint16_t expNested[1] = { 'Z' };
+            if (!runCase(cfg, expNested, 1U)) return false;
+        }
+
+        // Case 5: Unmatched If (LayerIs 2 -> false) -> Click 'X' (missing EndIf)
+        {
+            state->activeRemapLayer.store(0U, std::memory_order_release);
+            mask::core::ComplexSequenceConfig cfg{};
+            cfg.enabled = true;
+            cfg.inUse = true;
+            cfg.stepCount = 2;
+            cfg.steps[0] = makeCond(mask::core::ComplexConditionKind::LayerIs, false);
+            cfg.steps[0].param = 2U;
+            cfg.steps[1] = makeKeyClick('X');
+
+            if (!runCase(cfg, nullptr, 0U)) return false;
+        }
+
+        return true;
+    }
+
     [[nodiscard]] static bool SaveSequences(
         const wchar_t* path,
         const std::array<mask::core::ComplexSequenceConfig, mask::core::kMaxComplexSequences>& cfgs
@@ -586,6 +759,7 @@ private:
         bool     waitingForColor{false};
         uint16_t currentStep{0};
         uint64_t waitDeadlineQpc{0};
+        uint64_t phaseAnchorQpc{0};
         uint64_t nextColorPollQpc{0};
         uint64_t colorTimeoutQpc{0}; // 0 = no timeout
         uint32_t lastSeenToggleEdges{0};
@@ -616,8 +790,7 @@ private:
     }
 
     [[nodiscard]] static uint64_t NowTsc() noexcept {
-        unsigned int aux = 0;
-        return __rdtscp(&aux);
+        return mask::timing::TimingEngine::ReadTsc();
     }
 
     [[nodiscard]] uint64_t MsToQpc(uint64_t ms) const noexcept {
@@ -629,21 +802,23 @@ private:
         return (wholeSec * qpcFreqHz_) + ((remMs * qpcFreqHz_) / 1000ULL);
     }
 
-    [[nodiscard]] int64_t QpcDeltaTo100Ns(uint64_t deltaQpc) const noexcept {
-        if (deltaQpc == 0ULL) {
-            return 0;
+    [[nodiscard]] uint64_t QpcDeltaToNs(uint64_t deltaQpc) const noexcept {
+        if (deltaQpc == 0ULL || qpcFreqHz_ == 0ULL) {
+            return 0ULL;
         }
-        constexpr uint64_t k100NsPerSec = 10'000'000ULL;
-        const uint64_t wholeSec = deltaQpc / qpcFreqHz_;
-        const uint64_t remQpc = deltaQpc % qpcFreqHz_;
-        uint64_t ticks100Ns = (wholeSec * k100NsPerSec) + ((remQpc * k100NsPerSec) / qpcFreqHz_);
-        if (ticks100Ns < 1000ULL) {
-            ticks100Ns = 1000ULL; // 100 us minimum waitable timer quantum
+        constexpr uint64_t kNsPerSec  = 1'000'000'000ULL;
+        constexpr uint64_t kMaxWaitNs = 3'600ULL * kNsPerSec;
+        uint64_t high = 0;
+        const uint64_t low = _umul128(deltaQpc, kNsPerSec, &high);
+        if (high >= qpcFreqHz_) {
+            return kMaxWaitNs;
         }
-        if (ticks100Ns > static_cast<uint64_t>(3'600ULL * k100NsPerSec)) {
-            ticks100Ns = 3'600ULL * k100NsPerSec;
+        uint64_t rem = 0;
+        const uint64_t ns = _udiv128(high, low, qpcFreqHz_, &rem);
+        if (ns == 0ULL) {
+            return 1ULL;
         }
-        return static_cast<int64_t>(ticks100Ns);
+        return (std::min)(ns, kMaxWaitNs);
     }
 
     void PublishTriggerCache(size_t index, const mask::core::ComplexSequenceConfig& cfg) noexcept {
@@ -709,6 +884,7 @@ private:
         rt.waitingForColor = false;
         rt.currentStep = 0U;
         rt.waitDeadlineQpc = 0ULL;
+        rt.phaseAnchorQpc = 0ULL;
         rt.nextColorPollQpc = 0ULL;
         rt.colorTimeoutQpc = 0ULL;
         rt.loopDepth = 0U;
@@ -749,6 +925,7 @@ private:
         rt.waitingForColor = false;
         rt.currentStep = 0U;
         rt.waitDeadlineQpc = 0ULL;
+        rt.phaseAnchorQpc = NowQpc();
         rt.nextColorPollQpc = 0ULL;
         rt.colorTimeoutQpc = 0ULL;
         rt.loopDepth = 0U;
@@ -878,6 +1055,98 @@ private:
         }
     }
 
+    [[nodiscard]] bool EvaluateCondition(
+        const mask::core::ComplexStep& step,
+        SequenceRuntimeState& rt
+    ) const noexcept {
+        bool matched = false;
+        switch (mask::core::GetStepConditionKind(step)) {
+            case mask::core::ComplexConditionKind::KeyHeld: {
+                const uint16_t vk = static_cast<uint16_t>(step.vk & 0xFFU);
+                if (vk != 0U) {
+                    const bool phys = sharedState_.physicalKeyState[vk].load(std::memory_order_acquire) != 0U;
+                    const bool synth = sharedState_.syntheticHeldState[vk].load(std::memory_order_relaxed) != 0U;
+                    matched = phys || (!synth && (GetAsyncKeyState(static_cast<int>(vk)) & 0x8000) != 0);
+                }
+                break;
+            }
+            case mask::core::ComplexConditionKind::ColorMatches: {
+                const PixelSampleFn sampler = pixelSampler_.load(std::memory_order_acquire);
+                if (sampler != nullptr) {
+                    uint8_t r = 0U, g = 0U, b = 0U;
+                    if (sampler(step.x, step.y, r, g, b)) {
+                        const int dr = static_cast<int>(r) - static_cast<int>(step.r);
+                        const int dg = static_cast<int>(g) - static_cast<int>(step.g);
+                        const int db = static_cast<int>(b) - static_cast<int>(step.b);
+                        const int tol = static_cast<int>(step.tolerance);
+                        matched = (dr >= -tol && dr <= tol) &&
+                                  (dg >= -tol && dg <= tol) &&
+                                  (db >= -tol && db <= tol);
+                    }
+                }
+                break;
+            }
+            case mask::core::ComplexConditionKind::LayerIs: {
+                matched = ((sharedState_.activeRemapLayer.load(std::memory_order_acquire) & 3U) ==
+                           (step.param & 3U));
+                break;
+            }
+            case mask::core::ComplexConditionKind::UnlockStateIs: {
+                const bool unlocked = sharedState_.remapUnlocked.load(std::memory_order_acquire);
+                matched = (step.param != 0U) ? !unlocked : unlocked;
+                break;
+            }
+            case mask::core::ComplexConditionKind::MacroActive: {
+                const uint32_t slotIdx = step.param % static_cast<uint32_t>(mask::core::kMaxMacroSlots);
+                const auto snap = sharedState_.ReadTelemetry();
+                matched = (((snap.activeSlotBitmask | snap.toggledSlotBitmask) & (1ULL << slotIdx)) != 0ULL);
+                break;
+            }
+            case mask::core::ComplexConditionKind::RandomChance: {
+                const uint32_t pct = (std::min)(step.param, 100U);
+                if (pct >= 100U) {
+                    matched = true;
+                } else if (pct == 0U) {
+                    matched = false;
+                } else {
+                    matched = (detail::NextXorShift64Star(rt.rngState) % 100ULL) < static_cast<uint64_t>(pct);
+                }
+                break;
+            }
+            default:
+                matched = false;
+                break;
+        }
+        if (mask::core::IsStepConditionNegated(step)) {
+            matched = !matched;
+        }
+        return matched;
+    }
+
+    [[nodiscard]] static uint16_t FindConditionalJumpTarget(
+        const mask::core::ComplexSequenceConfig& cfg,
+        uint16_t fromStep,
+        bool stopAtElse
+    ) noexcept {
+        uint32_t depth = 0U;
+        for (uint16_t i = fromStep; i < cfg.stepCount; ++i) {
+            const auto k = static_cast<mask::core::ComplexStepKind>(cfg.steps[i].kind);
+            if (k == mask::core::ComplexStepKind::IfCheck) {
+                ++depth;
+            } else if (k == mask::core::ComplexStepKind::ElseBranch) {
+                if (stopAtElse && depth == 0U) {
+                    return static_cast<uint16_t>(i + 1U);
+                }
+            } else if (k == mask::core::ComplexStepKind::EndIf) {
+                if (depth == 0U) {
+                    return static_cast<uint16_t>(i + 1U);
+                }
+                --depth;
+            }
+        }
+        return cfg.stepCount;
+    }
+
     // Advances a single active sequence until it hits a wait, finishes, or reaches its per-tick step budget.
     // Returns the earliest QPC timestamp when this sequence needs attention next (0 if inactive).
     [[nodiscard]] uint64_t AdvanceSequence(size_t index, uint64_t nowQpc) noexcept {
@@ -897,8 +1166,11 @@ private:
                 if (nowQpc < rt.waitDeadlineQpc) {
                     return rt.waitDeadlineQpc;
                 }
+                const uint64_t deadline = rt.waitDeadlineQpc;
                 rt.waitingForTimer = false;
                 rt.waitDeadlineQpc = 0ULL;
+                // Lock next step's phase to the ideal deadline (clamped at 50ms to prevent catch-up bursts after OS stall)
+                rt.phaseAnchorQpc = (nowQpc - deadline <= MsToQpc(50ULL)) ? deadline : nowQpc;
                 ++rt.currentStep;
             }
 
@@ -906,11 +1178,15 @@ private:
             if (rt.waitingForColor) {
                 if (rt.currentStep >= cfg.stepCount) {
                     rt.waitingForColor = false;
+                    rt.colorTimeoutQpc = 0ULL;
+                    rt.nextColorPollQpc = 0ULL;
+                    rt.phaseAnchorQpc = nowQpc;
                 } else {
                     if (rt.colorTimeoutQpc != 0ULL && nowQpc >= rt.colorTimeoutQpc) {
                         rt.waitingForColor = false;
                         rt.colorTimeoutQpc = 0ULL;
                         rt.nextColorPollQpc = 0ULL;
+                        rt.phaseAnchorQpc = nowQpc;
                         ++rt.currentStep;
                     } else if (nowQpc < rt.nextColorPollQpc) {
                         return (rt.colorTimeoutQpc != 0ULL && rt.colorTimeoutQpc < rt.nextColorPollQpc)
@@ -920,6 +1196,9 @@ private:
                         const PixelSampleFn sampler = pixelSampler_.load(std::memory_order_acquire);
                         if (sampler == nullptr) {
                             rt.waitingForColor = false;
+                            rt.colorTimeoutQpc = 0ULL;
+                            rt.nextColorPollQpc = 0ULL;
+                            rt.phaseAnchorQpc = nowQpc;
                             ++rt.currentStep;
                         } else {
                             const auto& step = cfg.steps[rt.currentStep];
@@ -938,6 +1217,7 @@ private:
                                 rt.waitingForColor = false;
                                 rt.colorTimeoutQpc = 0ULL;
                                 rt.nextColorPollQpc = 0ULL;
+                                rt.phaseAnchorQpc = nowQpc;
                                 ++rt.currentStep;
                             } else {
                                 rt.nextColorPollQpc = nowQpc + MsToQpc(kColorPollIntervalMs);
@@ -987,8 +1267,9 @@ private:
                     PushAuxCommand(cmd);
                 }
                 if (step.durationMs > 0U) {
+                    const uint64_t baseQpc = (rt.phaseAnchorQpc != 0ULL) ? rt.phaseAnchorQpc : nowQpc;
                     rt.waitingForTimer = true;
-                    rt.waitDeadlineQpc = nowQpc + MsToQpc(holdMs);
+                    rt.waitDeadlineQpc = baseQpc + MsToQpc(holdMs);
                     return rt.waitDeadlineQpc;
                 }
                 ++rt.currentStep;
@@ -1067,8 +1348,9 @@ private:
             case mask::core::ComplexStepKind::WaitMs: {
                 const uint32_t waitMs = detail::ApplyHumanizeMs(step.durationMs, cfg.humanizePct, rt.rngState);
                 if (waitMs > 0U) {
+                    const uint64_t baseQpc = (rt.phaseAnchorQpc != 0ULL) ? rt.phaseAnchorQpc : nowQpc;
                     rt.waitingForTimer = true;
-                    rt.waitDeadlineQpc = nowQpc + MsToQpc(waitMs);
+                    rt.waitDeadlineQpc = baseQpc + MsToQpc(waitMs);
                     return rt.waitDeadlineQpc;
                 }
                 ++rt.currentStep;
@@ -1169,6 +1451,22 @@ private:
                 ++rt.currentStep;
                 break;
             }
+            case mask::core::ComplexStepKind::IfCheck: {
+                if (EvaluateCondition(step, rt)) {
+                    ++rt.currentStep;
+                } else {
+                    rt.currentStep = FindConditionalJumpTarget(cfg, static_cast<uint16_t>(rt.currentStep + 1U), true);
+                }
+                break;
+            }
+            case mask::core::ComplexStepKind::ElseBranch: {
+                rt.currentStep = FindConditionalJumpTarget(cfg, static_cast<uint16_t>(rt.currentStep + 1U), false);
+                break;
+            }
+            case mask::core::ComplexStepKind::EndIf: {
+                ++rt.currentStep;
+                break;
+            }
             default:
                 ++rt.currentStep;
                 break;
@@ -1183,6 +1481,16 @@ private:
     }
 
     void WorkerLoop() noexcept {
+        if (stopRequested_.load(std::memory_order_acquire)) {
+            AbortAllWorker();
+            return;
+        }
+
+        // Constructed on the worker thread so TSC calibration never stalls the UI thread.
+        mask::timing::TimingEngine seqTiming;
+        seqTiming.BoostCurrentThreadRealtimePriority();
+        seqTiming.SetSpinPolicy(2U); // Eco: 60..800 us adaptive spin lead, 50 us safety margin
+
         while (!stopRequested_.load(std::memory_order_acquire)) {
             SyncDirtyConfigs();
             ProcessPendingTriggers();
@@ -1224,19 +1532,20 @@ private:
                 continue;
             }
 
-            // One or more sequences are active: wait until earliest deadline or instant wakeEvent_
+            // One or more sequences are active: hybrid wait (50ms max slice) or instant wakeEvent_
             const uint64_t afterQpc = NowQpc();
             if (earliestWakeQpc > afterQpc && earliestWakeQpc != (std::numeric_limits<uint64_t>::max)()) {
                 const uint64_t deltaQpc = earliestWakeQpc - afterQpc;
-                if (waitableTimer_ != nullptr && wakeEvent_ != nullptr) {
-                    LARGE_INTEGER due{};
-                    due.QuadPart = -QpcDeltaTo100Ns(deltaQpc);
-                    SetWaitableTimerEx(waitableTimer_, &due, 0, nullptr, nullptr, nullptr, 0);
-                    HANDLE handles[2]{wakeEvent_, waitableTimer_};
-                    WaitForMultipleObjects(2U, handles, FALSE, INFINITE);
-                } else if (wakeEvent_ != nullptr) {
-                    const uint64_t ms = (deltaQpc * 1000ULL) / qpcFreqHz_;
-                    WaitForSingleObject(wakeEvent_, static_cast<DWORD>(ms > 0ULL ? ms : 1ULL));
+                const uint64_t deltaNs = QpcDeltaToNs(deltaQpc);
+                if (deltaNs > 0ULL) {
+                    if (wakeEvent_ != nullptr) {
+                        const uint64_t nowTsc = mask::timing::TimingEngine::ReadTsc();
+                        const uint64_t targetTsc = nowTsc + seqTiming.NanosecondsToTsc(deltaNs);
+                        (void)seqTiming.WaitUntilTscOrEvent(targetTsc, wakeEvent_, 50'000'000ULL);
+                    } else {
+                        const uint64_t ms = std::clamp<uint64_t>(deltaNs / 1'000'000ULL, 1ULL, 50ULL);
+                        Sleep(static_cast<DWORD>(ms));
+                    }
                 }
             }
         }
@@ -1275,7 +1584,6 @@ private:
 
     uint64_t qpcFreqHz_{10'000'000ULL};
     HANDLE   wakeEvent_{nullptr};
-    HANDLE   waitableTimer_{nullptr};
     HANDLE   workerThread_{nullptr};
 };
 

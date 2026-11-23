@@ -281,9 +281,6 @@ public:
 
         SrwExclusiveGuard lock(lifecycleLock_);
 
-        wcsncpy_s(activeMouseProfileId_, mouseCopy, _TRUNCATE);
-        wcsncpy_s(activeKeyboardProfileId_, kbCopy, _TRUNCATE);
-
         if (!hostLoaded_.load(std::memory_order_acquire)) {
             if (!LoadDotNetHostAndDelegates()) {
                 return false;
@@ -299,6 +296,11 @@ public:
         wchar_t statusBuf[256]{};
         const int rc = fnInitialize(mouseCopy, kbCopy, statusBuf, 256);
         wcsncpy_s(lastStatusMessage_, statusBuf, _TRUNCATE);
+
+        if (rc >= 0) {
+            wcsncpy_s(activeMouseProfileId_, mouseCopy, _TRUNCATE);
+            wcsncpy_s(activeKeyboardProfileId_, kbCopy, _TRUNCATE);
+        }
 
         if (const HMBridge_GetActiveHardwareIds_Fn fnIds = fnGetActiveHardwareIds_.load(std::memory_order_acquire)) {
             uint16_t mVid = 0, mPid = 0, kVid = 0, kPid = 0;

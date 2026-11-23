@@ -47,11 +47,11 @@ enum class EnginePowerMode : uint8_t {
 };
 
 enum class AccentPreset : uint8_t {
-    Amber   = 0,
-    Cyan    = 1,
-    Emerald = 2,
-    Violet  = 3,
-    Crimson = 4
+    CosmicCyan   = 0,
+    DeepSapphire = 1,
+    IceStarlight = 2,
+    NebulaViolet = 3,
+    AuroraTeal   = 4
 };
 
 struct AppSettings {
@@ -73,7 +73,7 @@ struct AppSettings {
 
     // Appearance & Animations
     uint8_t  animationQuality{static_cast<uint8_t>(AnimationQuality::Full)};
-    uint8_t  accentPreset{static_cast<uint8_t>(AccentPreset::Amber)};
+    uint8_t  accentPreset{static_cast<uint8_t>(AccentPreset::CosmicCyan)};
     bool     compactSidebar{false};
     bool     showSignalView{true};
     bool     showLiveKeyIndicators{true};
@@ -246,8 +246,8 @@ inline void SanitizeSettings(AppSettings& s) noexcept {
     if (s.animationQuality > static_cast<uint8_t>(AnimationQuality::Off)) {
         s.animationQuality = static_cast<uint8_t>(AnimationQuality::Full);
     }
-    if (s.accentPreset > static_cast<uint8_t>(AccentPreset::Crimson)) {
-        s.accentPreset = static_cast<uint8_t>(AccentPreset::Amber);
+    if (s.accentPreset > static_cast<uint8_t>(AccentPreset::AuroraTeal)) {
+        s.accentPreset = static_cast<uint8_t>(AccentPreset::CosmicCyan);
     }
     s.compactSidebar        = detail::SanitizeBool(s.compactSidebar);
     s.showSignalView        = detail::SanitizeBool(s.showSignalView);

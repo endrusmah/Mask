@@ -1,8 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Threading;
+using System.Threading.Tasks;
 using HIDMaestro;
 
 namespace Mask.Bridge
@@ -28,6 +30,8 @@ namespace Mask.Bridge
 
         private static volatile bool s_initialized;
         private static volatile bool s_driverInstalledCached;
+        private static volatile bool s_mouseFaulted;
+        private static volatile bool s_keyboardFaulted;
         private static volatile int s_mouseTransportIndex = -1;
         private static volatile int s_keyboardTransportIndex = -1;
         private static volatile int s_loadedProfileCount;
@@ -38,6 +42,8 @@ namespace Mask.Bridge
         private static string s_lastStatus = "Uninitialized";
         private static string s_activeMouseProfileId = "logitech-g502-hero";
         private static string s_activeKeyboardProfileId = "keychron-q6";
+        private static string? s_liveMouseProfileId;
+        private static string? s_liveKeyboardProfileId;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static void AcquireSpinGuard(ref int guard)
@@ -156,10 +162,12 @@ namespace Mask.Bridge
                         return 1;
                     }
 
-                    // Ensure UMDF2 driver is current and sweep any orphaned devices from prior dead processes
-                    s_context.InstallDriver();
-                    s_driverInstalledCached = s_context.IsDriverInstalled;
-                    HMContext.RemoveAllVirtualControllers(HMCleanupScope.Orphaned, preserveInstall: true);
+                    // Only run driver install check when the UMDF2 driver is not already installed.
+                    if (!driverAlreadyInstalled)
+                    {
+                        s_context.InstallDriver();
+                        s_driverInstalledCached = s_context.IsDriverInstalled;
+                    }
 
                     HMProfile? mouseProfile = s_context.GetProfile(requestedMouseId)
                                               ?? s_context.GetProfile("logitech-g502-hero");
@@ -174,67 +182,245 @@ namespace Mask.Bridge
                         return -2;
                     }
 
-                    bool mouseLocked = false;
-                    bool kbLocked = false;
-                    try
+                    HMController? curMouse = Volatile.Read(ref s_mouseController);
+                    HMController? curKb = Volatile.Read(ref s_keyboardController);
+
+                    // Sweep orphaned virtual devices ONLY on cold startup (never during live device swaps).
+                    if (curMouse == null && curKb == null)
                     {
-                        s_initialized = false;
-                        AcquireSpinGuard(ref s_mouseGuard);
-                        mouseLocked = true;
-                        AcquireSpinGuard(ref s_keyboardGuard);
-                        kbLocked = true;
+                        HMContext.RemoveAllVirtualControllers(HMCleanupScope.Orphaned, preserveInstall: true);
+                    }
 
-                        Interlocked.Exchange(ref s_mouseController, null)?.Dispose();
-                        Interlocked.Exchange(ref s_keyboardController, null)?.Dispose();
+                    bool needMouse = (curMouse == null) ||
+                                     s_mouseFaulted ||
+                                     !string.Equals(s_liveMouseProfileId, mouseProfile.Id, StringComparison.OrdinalIgnoreCase);
+                    bool needKb = (curKb == null) ||
+                                  s_keyboardFaulted ||
+                                  !string.Equals(s_liveKeyboardProfileId, kbProfile.Id, StringComparison.OrdinalIgnoreCase);
 
+                    if (!needMouse && !needKb)
+                    {
                         s_activeMouseVid = mouseProfile.VendorId;
                         s_activeMousePid = mouseProfile.ProductId;
                         s_activeKeyboardVid = kbProfile.VendorId;
                         s_activeKeyboardPid = kbProfile.ProductId;
-
-                        HMController newMouse = s_context.CreateController(mouseProfile, "mask-hw-mouse-0");
-                        Volatile.Write(ref s_mouseController, newMouse);
-
-                        HMController newKb = s_context.CreateController(kbProfile, "mask-hw-keyboard-0");
-                        Volatile.Write(ref s_keyboardController, newKb);
-
-                        s_mouseTransportIndex = newMouse.TransportIndex;
-                        s_keyboardTransportIndex = newKb.TransportIndex;
-
-                        // Send initial neutral hardware release frames so both devices start clean
-                        HMMouseState neutralMouse = default;
-                        newMouse.SubmitMouse(in neutralMouse);
-                        newKb.SubmitKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty);
-
                         s_initialized = true;
-                        Version? drvVer = newMouse.DriverVersion ?? newKb.DriverVersion;
-                        s_lastStatus = $"HIDMaestro v2.1.0 LIVE [Drv {drvVer?.ToString() ?? "2.1.0"}] | Mouse: {mouseProfile.Name} (#{s_mouseTransportIndex}) | KB: {kbProfile.Name} (#{s_keyboardTransportIndex})";
+                        Version? liveVer = curMouse!.DriverVersion ?? curKb!.DriverVersion;
+                        s_lastStatus = $"HIDMaestro v2.1.0 LIVE [Drv {liveVer?.ToString() ?? "2.1.0"}] | Mouse: {mouseProfile.Name} (#{s_mouseTransportIndex}) | KB: {kbProfile.Name} (#{s_keyboardTransportIndex})";
                         WriteWideString(s_lastStatus, statusOutBuffer, statusOutBufferChars);
                         return 0;
                     }
-                    finally
+
+                    if (needMouse && needKb)
                     {
-                        if (kbLocked)
+                        s_initialized = false;
+                    }
+
+                    // 1. Briefly acquire ONLY the guard(s) for controller(s) being swapped to detach old references.
+                    HMController? oldMouse = null;
+                    HMController? oldKb = null;
+
+                    if (needMouse)
+                    {
+                        bool mouseLocked = false;
+                        try
                         {
-                            ReleaseSpinGuard(ref s_keyboardGuard);
+                            AcquireSpinGuard(ref s_mouseGuard);
+                            mouseLocked = true;
+                            oldMouse = Interlocked.Exchange(ref s_mouseController, null);
                         }
-                        if (mouseLocked)
+                        finally
                         {
-                            ReleaseSpinGuard(ref s_mouseGuard);
+                            if (mouseLocked)
+                            {
+                                ReleaseSpinGuard(ref s_mouseGuard);
+                            }
+                        }
+                        s_liveMouseProfileId = null;
+                        s_mouseTransportIndex = -1;
+                        s_activeMouseVid = 0;
+                        s_activeMousePid = 0;
+                        s_mouseFaulted = false;
+                    }
+
+                    if (needKb)
+                    {
+                        bool kbLocked = false;
+                        try
+                        {
+                            AcquireSpinGuard(ref s_keyboardGuard);
+                            kbLocked = true;
+                            oldKb = Interlocked.Exchange(ref s_keyboardController, null);
+                        }
+                        finally
+                        {
+                            if (kbLocked)
+                            {
+                                ReleaseSpinGuard(ref s_keyboardGuard);
+                            }
+                        }
+                        s_liveKeyboardProfileId = null;
+                        s_keyboardTransportIndex = -1;
+                        s_activeKeyboardVid = 0;
+                        s_activeKeyboardPid = 0;
+                        s_keyboardFaulted = false;
+                    }
+
+                    // 2. Neutral-release and dispose old controller(s) OUTSIDE all spinlocks.
+                    if (oldMouse != null)
+                    {
+                        try
+                        {
+                            HMMouseState neutralOldMouse = default;
+                            oldMouse.SubmitMouse(in neutralOldMouse);
+                        }
+                        catch
+                        {
+                            // Best-effort neutral release before dispose
                         }
                     }
-                }
-                catch (UnauthorizedAccessException ex)
-                {
-                    s_initialized = false;
-                    s_lastStatus = $"HIDMaestro Elevation Required: {ex.Message}";
+                    if (oldKb != null)
+                    {
+                        try
+                        {
+                            oldKb.SubmitKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty);
+                        }
+                        catch
+                        {
+                            // Best-effort neutral release before dispose
+                        }
+                    }
+                    if (oldMouse != null && oldKb != null)
+                    {
+                        s_context.DisposeControllersInParallel(new HMController[] { oldMouse, oldKb }, null);
+                    }
+                    else
+                    {
+                        oldMouse?.Dispose();
+                        oldKb?.Dispose();
+                    }
+
+                    // 3. Create + initialize neutral state on new controller(s) OUTSIDE all spinlocks.
+                    //    On cold startup (or when both change), create Mouse & Keyboard in parallel to halve PnP latency.
+                    HMController? newMouse = null;
+                    HMController? newKb = null;
+                    HMContext ctx = s_context;
+
+                    if (needMouse && needKb)
+                    {
+                        Task<HMController> mouseTask = Task.Run(() =>
+                        {
+                            HMController c = ctx.CreateController(mouseProfile, "mask-hw-mouse-0");
+                            HMMouseState neutralMouse = default;
+                            c.SubmitMouse(in neutralMouse);
+                            return c;
+                        });
+                        Task<HMController> kbTask = Task.Run(() =>
+                        {
+                            HMController c = ctx.CreateController(kbProfile, "mask-hw-keyboard-0");
+                            c.SubmitKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty);
+                            return c;
+                        });
+
+                        try
+                        {
+                            Task.WaitAll(mouseTask, kbTask);
+                            newMouse = mouseTask.Result;
+                            newKb = kbTask.Result;
+                        }
+                        catch
+                        {
+                            if (mouseTask.IsCompletedSuccessfully)
+                            {
+                                try { mouseTask.Result.Dispose(); } catch { }
+                            }
+                            if (kbTask.IsCompletedSuccessfully)
+                            {
+                                try { kbTask.Result.Dispose(); } catch { }
+                            }
+                            throw;
+                        }
+                    }
+                    else if (needMouse)
+                    {
+                        newMouse = ctx.CreateController(mouseProfile, "mask-hw-mouse-0");
+                        HMMouseState neutralMouse = default;
+                        newMouse.SubmitMouse(in neutralMouse);
+                    }
+                    else if (needKb)
+                    {
+                        newKb = ctx.CreateController(kbProfile, "mask-hw-keyboard-0");
+                        newKb.SubmitKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty);
+                    }
+
+                    // 4. Briefly acquire guard ONLY to store the live controller reference + metadata, then release immediately.
+                    if (needMouse && newMouse != null)
+                    {
+                        bool mouseLocked = false;
+                        try
+                        {
+                            AcquireSpinGuard(ref s_mouseGuard);
+                            mouseLocked = true;
+                            Volatile.Write(ref s_mouseController, newMouse);
+                            s_mouseTransportIndex = newMouse.TransportIndex;
+                            s_activeMouseVid = mouseProfile.VendorId;
+                            s_activeMousePid = mouseProfile.ProductId;
+                            s_liveMouseProfileId = mouseProfile.Id;
+                            s_mouseFaulted = false;
+                        }
+                        finally
+                        {
+                            if (mouseLocked)
+                            {
+                                ReleaseSpinGuard(ref s_mouseGuard);
+                            }
+                        }
+                    }
+
+                    if (needKb && newKb != null)
+                    {
+                        bool kbLocked = false;
+                        try
+                        {
+                            AcquireSpinGuard(ref s_keyboardGuard);
+                            kbLocked = true;
+                            Volatile.Write(ref s_keyboardController, newKb);
+                            s_keyboardTransportIndex = newKb.TransportIndex;
+                            s_activeKeyboardVid = kbProfile.VendorId;
+                            s_activeKeyboardPid = kbProfile.ProductId;
+                            s_liveKeyboardProfileId = kbProfile.Id;
+                            s_keyboardFaulted = false;
+                        }
+                        finally
+                        {
+                            if (kbLocked)
+                            {
+                                ReleaseSpinGuard(ref s_keyboardGuard);
+                            }
+                        }
+                    }
+
+                    HMController? liveMouse = Volatile.Read(ref s_mouseController);
+                    HMController? liveKb = Volatile.Read(ref s_keyboardController);
+                    s_initialized = (liveMouse != null && liveKb != null);
+                    Version? drvVer = liveMouse?.DriverVersion ?? liveKb?.DriverVersion;
+                    s_lastStatus = $"HIDMaestro v2.1.0 LIVE [Drv {drvVer?.ToString() ?? "2.1.0"}] | Mouse: {mouseProfile.Name} (#{s_mouseTransportIndex}) | KB: {kbProfile.Name} (#{s_keyboardTransportIndex})";
                     WriteWideString(s_lastStatus, statusOutBuffer, statusOutBufferChars);
-                    return 1;
+                    return 0;
                 }
                 catch (Exception ex)
                 {
-                    s_initialized = false;
-                    s_lastStatus = $"HIDMaestro Init Exception ({ex.GetType().Name}): {ex.Message}";
+                    Exception actual = (ex is AggregateException agg && agg.InnerException != null)
+                        ? agg.InnerException
+                        : ex;
+                    s_initialized = (Volatile.Read(ref s_mouseController) != null && Volatile.Read(ref s_keyboardController) != null);
+                    if (actual is UnauthorizedAccessException)
+                    {
+                        s_lastStatus = $"HIDMaestro Elevation Required: {actual.Message}";
+                        WriteWideString(s_lastStatus, statusOutBuffer, statusOutBufferChars);
+                        return 1;
+                    }
+                    s_lastStatus = $"HIDMaestro Init Exception ({actual.GetType().Name}): {actual.Message}";
                     WriteWideString(s_lastStatus, statusOutBuffer, statusOutBufferChars);
                     return -1;
                 }
@@ -279,6 +465,7 @@ namespace Mask.Bridge
             }
             catch
             {
+                s_mouseFaulted = true;
                 return -2;
             }
             finally
@@ -333,6 +520,7 @@ namespace Mask.Bridge
             }
             catch
             {
+                s_keyboardFaulted = true;
                 return -2;
             }
             finally
@@ -467,12 +655,44 @@ namespace Mask.Bridge
             {
                 try
                 {
-                    HMController? mouse = Interlocked.Exchange(ref s_mouseController, null);
-                    HMController? kb = Interlocked.Exchange(ref s_keyboardController, null);
+                    HMController? mouse = null;
+                    bool mLocked = false;
+                    try
+                    {
+                        mLocked = TryAcquireSpinGuardBounded(ref s_mouseGuard, 20000);
+                        mouse = Interlocked.Exchange(ref s_mouseController, null);
+                    }
+                    finally
+                    {
+                        if (mLocked)
+                        {
+                            ReleaseSpinGuard(ref s_mouseGuard);
+                        }
+                    }
+
+                    HMController? kb = null;
+                    bool kLocked = false;
+                    try
+                    {
+                        kLocked = TryAcquireSpinGuardBounded(ref s_keyboardGuard, 20000);
+                        kb = Interlocked.Exchange(ref s_keyboardController, null);
+                    }
+                    finally
+                    {
+                        if (kLocked)
+                        {
+                            ReleaseSpinGuard(ref s_keyboardGuard);
+                        }
+                    }
+
+                    s_liveMouseProfileId = null;
+                    s_liveKeyboardProfileId = null;
+                    s_mouseFaulted = false;
+                    s_keyboardFaulted = false;
 
                     if (s_context != null && (mouse != null || kb != null))
                     {
-                        var list = new System.Collections.Generic.List<HMController>(2);
+                        var list = new List<HMController>(2);
                         if (mouse != null) list.Add(mouse);
                         if (kb != null) list.Add(kb);
                         s_context.DisposeControllersInParallel(list, null);
@@ -531,7 +751,10 @@ namespace Mask.Bridge
             {
                 Monitor.TryEnter(s_lifecycleLock, 0, ref lockTaken);
 
-                if (outInitialized != null) *outInitialized = s_initialized ? 1 : 0;
+                bool bothLive = s_initialized &&
+                                Volatile.Read(ref s_mouseController) != null &&
+                                Volatile.Read(ref s_keyboardController) != null;
+                if (outInitialized != null) *outInitialized = bothLive ? 1 : 0;
                 if (outElevated != null) *outElevated = IsProcessElevated() ? 1 : 0;
                 if (outMouseTransportIdx != null) *outMouseTransportIdx = s_mouseTransportIndex;
                 if (outKbTransportIdx != null) *outKbTransportIdx = s_keyboardTransportIndex;

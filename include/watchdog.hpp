@@ -70,6 +70,7 @@ public:
         if (wasRunning) {
             // Always perform a final clean hardware neutral release on shutdown
             ReleaseAllSyntheticHeldInputs();
+            ClearVirtualEchoTokens();
         }
     }
 
@@ -117,17 +118,30 @@ public:
     }
 
     /**
-     * @brief Clears all 256 `syntheticHeldState` slots and commands HIDMaestro v2.1.0 to emit
+     * @brief Clears all 256 `syntheticHeldState` slots, stamps virtual echo UP tokens for any keys
+     * currently held so live hooks pass the release through, and commands HIDMaestro v2.1.0 to emit
      * zeroed neutral reports on both the virtual mouse and virtual keyboard.
      */
     void ReleaseAllSyntheticHeldInputs() noexcept {
         for (uint16_t vk = 0; vk < 256; ++vk) {
-            sharedState_.syntheticHeldState[vk].store(0U, std::memory_order_release);
+            if (sharedState_.syntheticHeldState[vk].exchange(0U, std::memory_order_acq_rel) != 0U) {
+                mask::input::InputDispatcher::StampVirtualEchoToken(sharedState_, vk, false);
+            }
+        }
+        for (auto& w : sharedState_.syntheticKeyBits) {
+            w.store(0ULL, std::memory_order_release);
         }
         sharedState_.activeMouseButtonMask.store(0U, std::memory_order_release);
         sharedState_.activeKeyModifierMask.store(0U, std::memory_order_release);
 
         mask::bridge::HIDMaestroHost::Instance().ReleaseAllNeutralHardware();
+    }
+
+    /**
+     * @brief Resets all per-VK virtual echo token counters and timestamps cleanly on shutdown.
+     */
+    void ClearVirtualEchoTokens() noexcept {
+        mask::input::InputDispatcher::ClearVirtualEchoTokens(sharedState_);
     }
 
 private:

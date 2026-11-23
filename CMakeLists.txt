@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
-project(MaskDeterministicEngine VERSION 2.2.0 LANGUAGES CXX)
+project(MaskDeterministicEngine VERSION 2.3.0 LANGUAGES CXX)
+enable_language(RC)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,10 +15,12 @@ find_program(DOTNET_EXECUTABLE dotnet REQUIRED)
 
 add_executable(MaskEngine
     src/main.cpp
+    resources/mask.rc
 )
 
 target_include_directories(MaskEngine PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/resources
 )
 
 target_compile_definitions(MaskEngine PRIVATE
@@ -76,6 +79,7 @@ target_link_libraries(MaskEngine PRIVATE
     dxgi
     d2d1
     dwrite
+    d3dcompiler
     gdi32
     dwmapi
     gameinput

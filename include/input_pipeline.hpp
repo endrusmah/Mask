@@ -69,7 +69,7 @@ struct PerDeviceInputState {
 
 /**
  * @brief Global Context for Microsoft GameInput hardware reading callbacks and UI notifications.
- * Zero Win32 hooks (`SetWindowsHookEx` / `WH_KEYBOARD_LL` / `WH_MOUSE_LL` are 100% removed).
+ * Opt-in low-level hook remapping lives separately in `RemapEngine`.
  */
 struct GameInputGlobalContext {
     using PerDeviceTransitionCallback = void(*)(
@@ -736,6 +736,50 @@ public:
                vk == VK_XBUTTON1 || vk == VK_XBUTTON2 || IsWheelVirtualKey(vk);
     }
 
+    [[nodiscard]] static constexpr uint16_t NormalizeEchoVk(uint16_t vk) noexcept {
+        const uint8_t b = static_cast<uint8_t>(vk & 0xFFU);
+        if (b == VK_SHIFT)   return VK_LSHIFT;
+        if (b == VK_CONTROL) return VK_LCONTROL;
+        if (b == VK_MENU)    return VK_LMENU;
+        return b;
+    }
+
+    /**
+     * @brief Records a per-VK virtual echo token before submitting to HIDMaestro so active Win32
+     * remap hooks immediately pass our own synthetic output through without re-triggering remaps.
+     */
+    static void StampVirtualEchoToken(
+        mask::core::EngineSharedState& state,
+        uint16_t vk,
+        bool isDown
+    ) noexcept {
+        if (vk == 0U || IsWheelVirtualKey(vk)) {
+            return;
+        }
+        const uint16_t normVk = NormalizeEchoVk(vk);
+        if (normVk == 0U || normVk >= 256U) {
+            return;
+        }
+        unsigned int aux = 0;
+        const uint64_t nowTsc = __rdtscp(&aux);
+        if (isDown) {
+            state.virtualEchoDownTsc[normVk].store(nowTsc, std::memory_order_release);
+            state.virtualEchoDownCount[normVk].fetch_add(1U, std::memory_order_acq_rel);
+        } else {
+            state.virtualEchoUpTsc[normVk].store(nowTsc, std::memory_order_release);
+            state.virtualEchoUpCount[normVk].fetch_add(1U, std::memory_order_acq_rel);
+        }
+    }
+
+    static void ClearVirtualEchoTokens(mask::core::EngineSharedState& state) noexcept {
+        for (size_t i = 0; i < 256; ++i) {
+            state.virtualEchoDownCount[i].store(0U, std::memory_order_release);
+            state.virtualEchoUpCount[i].store(0U, std::memory_order_release);
+            state.virtualEchoDownTsc[i].store(0ULL, std::memory_order_release);
+            state.virtualEchoUpTsc[i].store(0ULL, std::memory_order_release);
+        }
+    }
+
     /**
      * @brief Presses or releases one key or mouse button.
      */
@@ -752,18 +796,19 @@ public:
         const uint8_t prevVal = sharedState_.syntheticHeldState[boundedVk].load(std::memory_order_relaxed);
         if (prevVal == newVal && lastKbSubmitOk_) {
             if (newVal == 0U) {
-                activeKeyBits_[boundedVk >> 6] &= ~(1ULL << (boundedVk & 63U));
+                sharedState_.syntheticKeyBits[boundedVk >> 6].fetch_and(~(1ULL << (boundedVk & 63U)), std::memory_order_acq_rel);
             }
             return true;
         }
 
-        // Update syntheticHeldState and the echo timestamp BEFORE calling HIDMaestro
+        // Update echo token, syntheticHeldState, and echo timestamp BEFORE calling HIDMaestro
+        StampVirtualEchoToken(sharedState_, boundedVk, isDown);
         StampSyntheticWrite();
         sharedState_.syntheticHeldState[boundedVk].store(newVal, std::memory_order_release);
         if (newVal != 0U) {
-            activeKeyBits_[boundedVk >> 6] |= (1ULL << (boundedVk & 63U));
+            sharedState_.syntheticKeyBits[boundedVk >> 6].fetch_or(1ULL << (boundedVk & 63U), std::memory_order_acq_rel);
         } else {
-            activeKeyBits_[boundedVk >> 6] &= ~(1ULL << (boundedVk & 63U));
+            sharedState_.syntheticKeyBits[boundedVk >> 6].fetch_and(~(1ULL << (boundedVk & 63U)), std::memory_order_acq_rel);
         }
         return SubmitKeyboardReport();
     }
@@ -798,21 +843,20 @@ public:
             return false;
         }
 
-        const uint32_t prevMask = sharedState_.activeMouseButtonMask.load(std::memory_order_relaxed);
-        uint32_t newMask = prevMask;
-        if (isDown) {
-            newMask |= btnBit;
-        } else {
-            newMask &= ~btnBit;
-        }
-
-        if (newMask == prevMask && dx == 0 && dy == 0 && lastMouseSubmitOk_) {
+        const uint32_t prevMask = sharedState_.activeMouseButtonMask.load(std::memory_order_acquire);
+        const bool alreadySame = isDown ? ((prevMask & btnBit) != 0U) : ((prevMask & btnBit) == 0U);
+        if (alreadySame && dx == 0 && dy == 0 && lastMouseSubmitOk_) {
             return true;
         }
 
+        if (!alreadySame) {
+            StampVirtualEchoToken(sharedState_, trackedVk, isDown);
+        }
         StampSyntheticWrite();
         sharedState_.syntheticHeldState[trackedVk].store(isDown ? 1U : 0U, std::memory_order_release);
-        sharedState_.activeMouseButtonMask.store(newMask, std::memory_order_release);
+        const uint32_t newMask = isDown
+            ? (sharedState_.activeMouseButtonMask.fetch_or(btnBit, std::memory_order_acq_rel) | btnBit)
+            : (sharedState_.activeMouseButtonMask.fetch_and(~btnBit, std::memory_order_acq_rel) & ~btnBit);
 
         const bool ok = Record(hmHost_.SubmitMouseHardware(newMask, dx, dy, 0, 0));
         lastMouseSubmitOk_ = ok;
@@ -843,30 +887,45 @@ public:
         if (relMouse && prsMouse) {
             const bool relWheel = IsWheelVirtualKey(relVk);
             const bool prsWheel = IsWheelVirtualKey(prsVk);
+            if (!relWheel) {
+                StampVirtualEchoToken(sharedState_, relVk, false);
+            }
+            if (!prsWheel) {
+                StampVirtualEchoToken(sharedState_, prsVk, true);
+            }
             StampSyntheticWrite();
-            uint32_t newMask = sharedState_.activeMouseButtonMask.load(std::memory_order_relaxed);
+            uint32_t clearBits = 0U;
+            uint32_t setBits = 0U;
             if (!relWheel) {
                 sharedState_.syntheticHeldState[relVk].store(0U, std::memory_order_release);
-                newMask &= ~mask::bridge::hm::VkToHMMouseButtonBit(relVk);
+                clearBits = mask::bridge::hm::VkToHMMouseButtonBit(relVk);
             }
             int32_t wheelDelta = 0;
             if (!prsWheel) {
                 sharedState_.syntheticHeldState[prsVk].store(1U, std::memory_order_release);
-                newMask |= mask::bridge::hm::VkToHMMouseButtonBit(prsVk);
+                setBits = mask::bridge::hm::VkToHMMouseButtonBit(prsVk);
             } else {
                 wheelDelta = (prsVk == mask::core::kVkWheelUp) ? 1 : -1;
             }
-            sharedState_.activeMouseButtonMask.store(newMask, std::memory_order_release);
+            uint32_t newMask = sharedState_.activeMouseButtonMask.load(std::memory_order_acquire);
+            if (clearBits != 0U) {
+                newMask = sharedState_.activeMouseButtonMask.fetch_and(~clearBits, std::memory_order_acq_rel) & ~clearBits;
+            }
+            if (setBits != 0U) {
+                newMask = sharedState_.activeMouseButtonMask.fetch_or(setBits, std::memory_order_acq_rel) | setBits;
+            }
             const bool ok = Record(hmHost_.SubmitMouseHardware(newMask, 0, 0, wheelDelta, 0));
             lastMouseSubmitOk_ = ok;
             return ok;
         }
         if (!relMouse && !prsMouse) {
+            StampVirtualEchoToken(sharedState_, relVk, false);
+            StampVirtualEchoToken(sharedState_, prsVk, true);
             StampSyntheticWrite();
             sharedState_.syntheticHeldState[relVk].store(0U, std::memory_order_release);
             sharedState_.syntheticHeldState[prsVk].store(1U, std::memory_order_release);
-            activeKeyBits_[relVk >> 6] &= ~(1ULL << (relVk & 63U));
-            activeKeyBits_[prsVk >> 6] |= (1ULL << (prsVk & 63U));
+            sharedState_.syntheticKeyBits[relVk >> 6].fetch_and(~(1ULL << (relVk & 63U)), std::memory_order_acq_rel);
+            sharedState_.syntheticKeyBits[prsVk >> 6].fetch_or(1ULL << (prsVk & 63U), std::memory_order_acq_rel);
             return SubmitKeyboardReport();
         }
         // Different devices: two reports, issued back to back (press first so there is no gap).
@@ -957,13 +1016,13 @@ private:
         int32_t keyCount = 0;
 
         for (size_t w = 0; w < 4; ++w) {
-            uint64_t bits = activeKeyBits_[w];
+            uint64_t bits = sharedState_.syntheticKeyBits[w].load(std::memory_order_acquire);
             while (bits != 0ULL) {
                 const uint64_t bitIdx = _tzcnt_u64(bits);
                 bits &= (bits - 1ULL);
                 const uint16_t vk = static_cast<uint16_t>((w << 6) | bitIdx);
-                if (sharedState_.syntheticHeldState[vk].load(std::memory_order_relaxed) == 0U) {
-                    activeKeyBits_[w] &= ~(1ULL << bitIdx);
+                if (sharedState_.syntheticHeldState[vk].load(std::memory_order_acquire) == 0U) {
+                    sharedState_.syntheticKeyBits[w].fetch_and(~(1ULL << bitIdx), std::memory_order_acq_rel);
                     continue;
                 }
                 const uint16_t packed = kVkToHidAndMod[vk];
@@ -1006,7 +1065,6 @@ private:
 
     mask::core::EngineSharedState& sharedState_;
     mask::bridge::HIDMaestroHost&  hmHost_;
-    std::array<uint64_t, 4>        activeKeyBits_{};
     uint32_t                       failureStreak_{0};
     uint64_t                       totalDispatched_{0};
     bool                           lastKbSubmitOk_{false};

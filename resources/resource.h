@@ -1,0 +1,12 @@
+#ifndef MASK_RESOURCE_H
+#define MASK_RESOURCE_H
+
+#define IDI_MASK_ICON 101
+
+#define MASK_VER_MAJOR 2
+#define MASK_VER_MINOR 3
+#define MASK_VER_PATCH 0
+#define MASK_VER_BUILD 0
+#define MASK_VER_STR   "2.3.0.0"
+
+#endif // MASK_RESOURCE_H

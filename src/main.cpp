@@ -11,6 +11,7 @@
 #include "ui_anim.hpp"
 #include "app_model.hpp"
 #include "app_view.hpp"
+#include "resource.h"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -101,6 +102,9 @@ bool      g_WindowFocused{true};
 bool      g_AnimTimerActive{false};
 bool      g_TrimTimerActive{false};
 bool      g_SettingsTabSnapped{false};
+bool      g_SidebarIndSnapped{false};
+uint64_t  g_LastFiringMask{0};
+uint16_t  g_LastFiringSeqMask{0};
 UINT      g_TriggerPreviewTimerMs{0};
 bool      g_PreviewActiveSent{false};
 uint8_t   g_PreviewSlotSent{0};
@@ -119,6 +123,7 @@ ULONGLONG         g_BindGraceUntil{0};
 void EnsureAnimTimer(HWND hwnd) noexcept;
 void UpdateUiTimerCadence(HWND hwnd) noexcept;
 void UpdateTriggerPreviewState(HWND hwnd) noexcept;
+void ApplyWin11Chrome(HWND hwnd) noexcept;
 void RefreshAppIcons(HWND hwnd) noexcept;
 void UpdateTrayTooltip(HWND hwnd) noexcept;
 void RestoreFromTray(HWND hwnd) noexcept;
@@ -214,9 +219,9 @@ void SyncAllEnginesFromModel() noexcept {
 
 void EnsureAnimTimer(HWND hwnd) noexcept {
     if (hwnd == nullptr) return;
-    const bool allowAnim = !IsIconic(hwnd) && IsWindowVisible(hwnd) && !g_HiddenToTray &&
-                           (g_WindowFocused || !g_Ui.settings.lowResourceWhenUnfocused);
-    const bool wantAnim = allowAnim && g_Animator.IsAnimating();
+    const bool windowActive = !IsIconic(hwnd) && IsWindowVisible(hwnd) && !g_HiddenToTray;
+    const bool allowAnim = windowActive && (g_WindowFocused || !g_Ui.settings.lowResourceWhenUnfocused);
+    const bool wantAnim = allowAnim && g_Animator.IsAnimating(g_WindowFocused, windowActive);
     if (wantAnim && !g_AnimTimerActive) {
         SetTimer(hwnd, kAnimTimerId, kAnimIntervalMs, nullptr);
         g_AnimTimerActive = true;
@@ -337,108 +342,8 @@ void RestartAsAdministrator(HWND hwnd) noexcept {
 }
 
 // =====================================================================================
-//  Custom High-Craft Mask Icon + System Tray
+//  Embedded Multi-Resolution Mask Icon + System Tray
 // =====================================================================================
-
-/**
- * @brief Renders a crisp faceted dark Mask shield/visor emblem with a luminous accent pulse trace.
- */
-HICON CreateAppIcon(int size, UINT32 accentRgb) noexcept {
-    BITMAPV5HEADER bi{};
-    bi.bV5Size        = sizeof(bi);
-    bi.bV5Width       = size;
-    bi.bV5Height      = -size;
-    bi.bV5Planes      = 1;
-    bi.bV5BitCount    = 32;
-    bi.bV5Compression = BI_BITFIELDS;
-    bi.bV5RedMask     = 0x00FF0000;
-    bi.bV5GreenMask   = 0x0000FF00;
-    bi.bV5BlueMask    = 0x000000FF;
-    bi.bV5AlphaMask   = 0xFF000000;
-
-    void* bits = nullptr;
-    const HDC screen = GetDC(nullptr);
-    const HBITMAP color = CreateDIBSection(screen, reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS, &bits, nullptr, 0);
-    ReleaseDC(nullptr, screen);
-    if (color == nullptr || bits == nullptr) return nullptr;
-
-    auto* px = static_cast<uint32_t*>(bits);
-    const float n = static_cast<float>(size);
-    const float radius = n * 0.24f;
-    const float stroke = std::max(1.5f, n * 0.082f);
-
-    const float accR = static_cast<float>((accentRgb >> 16) & 0xFFU);
-    const float accG = static_cast<float>((accentRgb >> 8) & 0xFFU);
-    const float accB = static_cast<float>(accentRgb & 0xFFU);
-
-    const float pts[6][2] = {
-        {0.19f, 0.61f}, {0.35f, 0.61f}, {0.35f, 0.37f},
-        {0.58f, 0.37f}, {0.58f, 0.61f}, {0.81f, 0.61f}
-    };
-    auto distToSegment = [](float x, float y, float ax, float ay, float bx, float by) noexcept {
-        const float vx = bx - ax, vy = by - ay;
-        const float len2 = vx * vx + vy * vy;
-        float t = len2 > 0.0f ? ((x - ax) * vx + (y - ay) * vy) / len2 : 0.0f;
-        t = std::clamp(t, 0.0f, 1.0f);
-        const float dx = x - (ax + t * vx), dy = y - (ay + t * vy);
-        return std::sqrt(dx * dx + dy * dy);
-    };
-
-    for (int y = 0; y < size; ++y) {
-        for (int x = 0; x < size; ++x) {
-            const float fx = static_cast<float>(x) + 0.5f;
-            const float fy = static_cast<float>(y) + 0.5f;
-
-            // Outer rounded shield tile SDF
-            const float qx = std::fabs(fx - n * 0.5f) - (n * 0.5f - radius);
-            const float qy = std::fabs(fy - n * 0.5f) - (n * 0.5f - radius);
-            const float sdf = std::sqrt(std::max(qx, 0.0f) * std::max(qx, 0.0f) +
-                                        std::max(qy, 0.0f) * std::max(qy, 0.0f)) +
-                              std::min(std::max(qx, qy), 0.0f) - radius;
-            const float tile = std::clamp(-sdf + 0.5f, 0.0f, 1.0f);
-
-            // Crisp accent rim around shield perimeter
-            const float rim = std::clamp(1.2f - std::fabs(sdf + 1.0f), 0.0f, 1.0f) * 0.55f;
-
-            // Inner visor band
-            const bool inVisor = (fx >= n * 0.14f && fx <= n * 0.86f && fy >= n * 0.25f && fy <= n * 0.75f);
-
-            // Pulse trace distance + soft glow
-            float d = 1e9f;
-            for (int i = 0; i < 5; ++i) {
-                d = std::min(d, distToSegment(fx, fy, pts[i][0] * n, pts[i][1] * n, pts[i + 1][0] * n, pts[i + 1][1] * n));
-            }
-            const float wave = std::clamp(stroke * 0.52f - d + 0.5f, 0.0f, 1.0f);
-            const float glow = std::clamp(1.0f - d / (stroke * 2.2f), 0.0f, 1.0f) * 0.30f;
-
-            // Base slate shading (slightly darker inside visor, subtle vertical gradient)
-            const float grad = 1.0f - (fy / n) * 0.18f;
-            float r = (inVisor ? 0x0F : 0x1E) * grad;
-            float g = (inVisor ? 0x13 : 0x24) * grad;
-            float b = (inVisor ? 0x1A : 0x33) * grad;
-
-            const float accMix = std::clamp(wave + glow + rim, 0.0f, 1.0f);
-            r = (r * (1.0f - accMix) + accR * accMix) * tile;
-            g = (g * (1.0f - accMix) + accG * accMix) * tile;
-            b = (b * (1.0f - accMix) + accB * accMix) * tile;
-            const float a = 255.0f * tile;
-            px[y * size + x] = (static_cast<uint32_t>(a + 0.5f) << 24) |
-                               (static_cast<uint32_t>(std::clamp(r, 0.0f, 255.0f) + 0.5f) << 16) |
-                               (static_cast<uint32_t>(std::clamp(g, 0.0f, 255.0f) + 0.5f) << 8) |
-                               static_cast<uint32_t>(std::clamp(b, 0.0f, 255.0f) + 0.5f);
-        }
-    }
-
-    const HBITMAP mask = CreateBitmap(size, size, 1, 1, nullptr);
-    ICONINFO info{};
-    info.fIcon    = TRUE;
-    info.hbmColor = color;
-    info.hbmMask  = mask;
-    const HICON icon = CreateIconIndirect(&info);
-    DeleteObject(color);
-    if (mask != nullptr) DeleteObject(mask);
-    return icon;
-}
 
 void UpdateTrayTooltip(HWND hwnd) noexcept {
     if (!g_TrayAdded) return;
@@ -485,9 +390,19 @@ void RemoveTrayIcon(HWND hwnd) noexcept {
 }
 
 void RefreshAppIcons(HWND hwnd) noexcept {
-    const auto pal = mask::ui::GetAccentPalette(g_Ui.settings.accentPreset);
-    HICON newLarge = CreateAppIcon(GetSystemMetrics(SM_CXICON), pal.signal);
-    HICON newSmall = CreateAppIcon(GetSystemMetrics(SM_CXSMICON), pal.signal);
+    const UINT rawDpi = (hwnd != nullptr && IsWindow(hwnd)) ? GetDpiForWindow(hwnd) : GetDpiForSystem();
+    const UINT dpi = (rawDpi > 0U) ? rawDpi : 96U;
+    const HINSTANCE hInst = GetModuleHandleW(nullptr);
+    const int cxBig   = GetSystemMetricsForDpi(SM_CXICON, dpi);
+    const int cyBig   = GetSystemMetricsForDpi(SM_CYICON, dpi);
+    const int cxSmall = GetSystemMetricsForDpi(SM_CXSMICON, dpi);
+    const int cySmall = GetSystemMetricsForDpi(SM_CYSMICON, dpi);
+
+    HICON newLarge = static_cast<HICON>(LoadImageW(
+        hInst, MAKEINTRESOURCEW(IDI_MASK_ICON), IMAGE_ICON, cxBig, cyBig, LR_DEFAULTCOLOR));
+    HICON newSmall = static_cast<HICON>(LoadImageW(
+        hInst, MAKEINTRESOURCEW(IDI_MASK_ICON), IMAGE_ICON, cxSmall, cySmall, LR_DEFAULTCOLOR));
+
     if (newLarge != nullptr) {
         if (hwnd != nullptr) SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(newLarge));
         if (g_IconLarge != nullptr) DestroyIcon(g_IconLarge);
@@ -498,7 +413,9 @@ void RefreshAppIcons(HWND hwnd) noexcept {
         if (g_IconSmall != nullptr) DestroyIcon(g_IconSmall);
         g_IconSmall = newSmall;
     }
-    UpdateTrayTooltip(hwnd);
+    if (hwnd != nullptr) {
+        UpdateTrayTooltip(hwnd);
+    }
 }
 
 void StartTrimTimerIfEnabled(HWND hwnd) noexcept {
@@ -519,7 +436,13 @@ void HideToTray(HWND hwnd) noexcept {
     AddTrayIcon(hwnd);
     g_HiddenToTray = true;
     g_WindowFocused = false;
+    g_Animator.SetCursorPosition(g_Animator.cursorX.value, g_Animator.cursorY.value, false, true);
+    g_Animator.OnPointerUp();
+    g_Animator.appOpen.Snap(g_Animator.appOpen.target);
+    g_Animator.viewTransition.Snap(g_Animator.viewTransition.target);
+    g_Animator.SnapAll();
     ShowWindow(hwnd, SW_HIDE);
+    g_Renderer.TrimGpu();
     UpdateUiTimerCadence(hwnd);
     StartTrimTimerIfEnabled(hwnd);
 }
@@ -528,6 +451,8 @@ void RestoreFromTray(HWND hwnd) noexcept {
     CancelTrimTimer(hwnd);
     g_HiddenToTray = false;
     g_WindowFocused = true;
+    g_SettingsTabSnapped = false;
+    g_SidebarIndSnapped = false;
     ShowWindow(hwnd, IsIconic(hwnd) ? SW_RESTORE : SW_SHOW);
     SetForegroundWindow(hwnd);
     UpdateUiTimerCadence(hwnd);
@@ -612,6 +537,32 @@ void SyncSelectedSequence() noexcept {
     g_Ui.MarkDirty();
 }
 
+void EnsureSelectedSeqStepVisible() noexcept {
+    if (g_Ui.selectedKind != ItemKind::Sequence || !g_Ui.HasSelection()) return;
+    const auto& seq = g_Ui.SelectedSeq();
+    const bool snapScroll = !g_WindowFocused ||
+        g_Ui.settings.animationQuality == static_cast<uint8_t>(mask::settings::AnimationQuality::Off);
+    if (seq.stepCount == 0U || g_Ui.selectedSeqStep < 0) {
+        g_Ui.seqStepScroll = 0.0f;
+        g_Animator.SetSeqScrollTarget(0.0f, snapScroll);
+        return;
+    }
+    const float pitch = UiRenderer::kSeqStepRowH + 4.0f;
+    const float top = static_cast<float>(g_Ui.selectedSeqStep) * pitch;
+    const float view = g_Renderer.SeqStepViewHeight();
+    float scroll = g_Animator.seqScrollSmooth.target;
+    if (top < scroll) {
+        scroll = top;
+    }
+    if (top + pitch + 8.0f > scroll + view) {
+        scroll = top + pitch + 8.0f - view;
+    }
+    const float maxScroll = std::max(0.0f, static_cast<float>(seq.stepCount) * pitch + 8.0f - view);
+    scroll = std::clamp(scroll, 0.0f, maxScroll);
+    g_Animator.SetSeqScrollTarget(scroll, snapScroll);
+    g_Ui.seqStepScroll = g_Animator.seqScrollSmooth.value;
+}
+
 void SyncSelectedRemap() noexcept {
     if (g_Ui.selectedKind != ItemKind::Remap) return;
     const int idx = std::clamp(g_Ui.selectedIndex, 0, kRemapRuleCount - 1);
@@ -678,12 +629,20 @@ void SampleTriggerEyedropperLoupe(int32_t cx, int32_t cy) noexcept {
     if (memDc != nullptr) DeleteDC(memDc);
     ReleaseDC(nullptr, screenDc);
 
+    std::memset(pv.loupeMatchMask, 0, sizeof(pv.loupeMatchMask));
     if (g_Ui.HasSelection() && g_Ui.selectedKind == ItemKind::Trigger) {
         const auto& t = g_Ui.SelectedTrigger();
-        const int32_t dr = static_cast<int32_t>(pv.sampledR) - static_cast<int32_t>(t.r);
-        const int32_t dg = static_cast<int32_t>(pv.sampledG) - static_cast<int32_t>(t.g);
-        const int32_t db = static_cast<int32_t>(pv.sampledB) - static_cast<int32_t>(t.b);
-        pv.colorDelta = static_cast<uint32_t>(std::lround(std::sqrt(static_cast<double>(dr * dr + dg * dg + db * db))));
+        const int rad = std::clamp<int>(t.sampleRadius, 0, kHalf);
+        for (int py = -rad; py <= rad; ++py) {
+            for (int px = -rad; px <= rad; ++px) {
+                const size_t idx = static_cast<size_t>((py + kHalf) * N + (px + kHalf));
+                pv.loupeMatchMask[idx] = 1U;
+            }
+        }
+        const int dr = std::abs(static_cast<int>(pv.sampledR) - static_cast<int>(t.r));
+        const int dg = std::abs(static_cast<int>(pv.sampledG) - static_cast<int>(t.g));
+        const int db = std::abs(static_cast<int>(pv.sampledB) - static_cast<int>(t.b));
+        pv.colorDelta = static_cast<uint32_t>(std::max({dr, dg, db}));
     }
 }
 
@@ -822,8 +781,13 @@ void CommitEdit() noexcept {
                     const auto kind = static_cast<ComplexStepKind>(st.kind);
                     if (kind == ComplexStepKind::MouseScroll) {
                         st.param = static_cast<uint32_t>(static_cast<int32_t>(std::clamp<long long>(iv, -120, 120)));
-                    } else if (kind == ComplexStepKind::ToggleMacro) {
+                    } else if (kind == ComplexStepKind::ToggleMacro ||
+                               (kind == ComplexStepKind::IfCheck &&
+                                mask::core::GetStepConditionKind(st) == ComplexConditionKind::MacroActive)) {
                         st.param = static_cast<uint32_t>(std::clamp<long long>(iv - 1, 0, kSlotCount - 1));
+                    } else if (kind == ComplexStepKind::IfCheck &&
+                               mask::core::GetStepConditionKind(st) == ComplexConditionKind::RandomChance) {
+                        st.param = static_cast<uint32_t>(std::clamp<long long>(iv, 1, 99));
                     } else {
                         st.param = static_cast<uint32_t>(std::clamp<long long>(iv, 0, 3'600'000));
                     }
@@ -884,7 +848,9 @@ void BeginEdit(Field f) noexcept {
                 const auto kind = static_cast<ComplexStepKind>(st.kind);
                 if (kind == ComplexStepKind::MouseScroll) {
                     std::swprintf(g_Ui.editBuffer, std::size(g_Ui.editBuffer), L"%d", static_cast<int>(static_cast<int32_t>(st.param)));
-                } else if (kind == ComplexStepKind::ToggleMacro) {
+                } else if (kind == ComplexStepKind::ToggleMacro ||
+                           (kind == ComplexStepKind::IfCheck &&
+                            mask::core::GetStepConditionKind(st) == ComplexConditionKind::MacroActive)) {
                     std::swprintf(g_Ui.editBuffer, std::size(g_Ui.editBuffer), L"%u", static_cast<unsigned>((st.param % kSlotCount) + 1U));
                 } else {
                     std::swprintf(g_Ui.editBuffer, std::size(g_Ui.editBuffer), L"%u", static_cast<unsigned>(st.param));
@@ -958,9 +924,14 @@ void StepField(Field f, int direction, bool coarse, bool fine) noexcept {
                 if (kind == ComplexStepKind::MouseScroll) {
                     const int32_t cur = static_cast<int32_t>(st.param);
                     st.param = static_cast<uint32_t>(std::clamp<int32_t>(cur + direction * (coarse ? 5 : 1), -120, 120));
-                } else if (kind == ComplexStepKind::ToggleMacro) {
+                } else if (kind == ComplexStepKind::ToggleMacro ||
+                           (kind == ComplexStepKind::IfCheck &&
+                            mask::core::GetStepConditionKind(st) == ComplexConditionKind::MacroActive)) {
                     const int cur = static_cast<int>(st.param % static_cast<uint32_t>(kSlotCount));
                     st.param = static_cast<uint32_t>((cur + direction + kSlotCount) % kSlotCount);
+                } else if (kind == ComplexStepKind::IfCheck &&
+                           mask::core::GetStepConditionKind(st) == ComplexConditionKind::RandomChance) {
+                    st.param = static_cast<uint32_t>(std::clamp<int>(static_cast<int>(st.param) + direction * (coarse ? 10 : 1), 1, 99));
                 } else if (kind == ComplexStepKind::WaitForColor) {
                     st.param = static_cast<uint32_t>(std::clamp<int>(static_cast<int>(st.param) + direction * (coarse ? 1000 : 250), 0, 3'600'000));
                 } else {
@@ -981,7 +952,7 @@ void StepField(Field f, int direction, bool coarse, bool fine) noexcept {
 void ApplyDutyFromPointer(int xPx) noexcept {
     if (g_Ui.selectedKind != ItemKind::Macro) return;
     auto& slot = g_Ui.Selected();
-    const double wanted = g_Renderer.DutyFromSliderX(xPx);
+    const double wanted = g_Renderer.DutyFromSliderXPx(xPx);
     const bool same = (wanted >= 100.0) ? IsFullDuty(slot)
                                         : (!IsFullDuty(slot) && std::fabs(DutyPercent(slot) - wanted) < 0.01);
     if (!same) {
@@ -992,7 +963,7 @@ void ApplyDutyFromPointer(int xPx) noexcept {
 
 void ApplyTriggerSliderFromPointer(int xPx) noexcept {
     if (g_Ui.selectedKind != ItemKind::Trigger || !g_Ui.HasSelection()) return;
-    const int nv = g_Renderer.TriggerToleranceFromX(xPx);
+    const int nv = g_Renderer.TriggerToleranceFromXPx(xPx);
     auto& t = g_Ui.SelectedTrigger();
     if (t.tolerance != static_cast<uint8_t>(nv)) {
         t.tolerance = static_cast<uint8_t>(nv);
@@ -1015,10 +986,17 @@ void StartBinding(HWND hwnd, uint8_t target, const wchar_t* message) noexcept {
 }
 
 void SelectItem(HWND hwnd, ItemKind kind, int index) noexcept {
-    const bool changed = g_Ui.showSettings || g_Ui.selectedKind != kind || g_Ui.selectedIndex != index;
+    const bool wasSettings = g_Ui.showSettings;
+    const bool changed = wasSettings || g_Ui.selectedKind != kind || g_Ui.selectedIndex != index;
     g_Ui.showSettings = false;
     g_Ui.showStepKindMenu = false;
     g_SettingsHwTabOpen.store(false, std::memory_order_release);
+    if (wasSettings) {
+        g_Animator.SetSettingsOpen(false);
+        g_Animator.SetSettingsTab(0.0f, 0.0f, true);
+        g_SettingsTabSnapped = false;
+        g_SidebarIndSnapped = false;
+    }
     g_Ui.pendingDeleteConfirm = false;
     g_Ui.pendingResetConfirm = false;
     g_Ui.selectedKind = kind;
@@ -1027,6 +1005,8 @@ void SelectItem(HWND hwnd, ItemKind kind, int index) noexcept {
     if (kind == ItemKind::Sequence) {
         const int maxStep = std::max(0, static_cast<int>(g_Ui.sequences[index].stepCount) - 1);
         g_Ui.selectedSeqStep = std::clamp(g_Ui.selectedSeqStep, 0, maxStep);
+        g_Animator.SetSeqScrollTarget(0.0f, true);
+        g_Ui.seqStepScroll = 0.0f;
     }
     // Keep the selected sidebar item scrolled into view
     {
@@ -1037,9 +1017,14 @@ void SelectItem(HWND hwnd, ItemKind kind, int index) noexcept {
                 const float pitch = g_Renderer.CurrentListRowHeight() + UiRenderer::kListRowGap;
                 const float top = static_cast<float>(pos) * pitch;
                 const float view = g_Renderer.ListViewHeight();
-                if (top < g_Ui.listScroll) g_Ui.listScroll = top;
-                if (top + pitch + 12.0f > g_Ui.listScroll + view) g_Ui.listScroll = top + pitch + 12.0f - view;
-                g_Ui.listScroll = std::max(0.0f, g_Ui.listScroll);
+                float scroll = g_Animator.listScrollSmooth.target;
+                if (top < scroll) scroll = top;
+                if (top + pitch + 12.0f > scroll + view) scroll = top + pitch + 12.0f - view;
+                scroll = std::max(0.0f, scroll);
+                const bool snapScroll = !g_WindowFocused ||
+                    g_Ui.settings.animationQuality == static_cast<uint8_t>(mask::settings::AnimationQuality::Off);
+                g_Animator.SetListScrollTarget(scroll, snapScroll);
+                g_Ui.listScroll = g_Animator.listScrollSmooth.value;
                 break;
             }
         }
@@ -1311,18 +1296,23 @@ void OpenSettingsAtTab(HWND hwnd, int tab) noexcept {
     const bool wasOpen = g_Ui.showSettings;
     g_Ui.showSettings = true;
     g_Ui.settingsTab = std::clamp(tab, 0, 4);
+    g_Animator.SetSettingsOpen(true);
     g_SettingsHwTabOpen.store(g_Ui.settingsTab == 4, std::memory_order_release);
     if (g_Ui.settingsTab == 4) {
         g_Ui.RefreshDevicesAndMonitors(g_RemapEnginePtr);
         mask::input::WakeEngine();
     }
-    float tx = 0.0f, tw = 80.0f;
-    g_Renderer.QuerySettingsTabRect(g_Ui.settingsTab, tx, tw);
-    if (tx > 1.0f) {
-        g_Animator.SetSettingsTab(tx, tw, !wasOpen || !g_SettingsTabSnapped);
-        g_SettingsTabSnapped = true;
+    if (!wasOpen) {
+        g_SettingsTabSnapped = false;
+        g_Animator.SetSettingsTab(0.0f, 0.0f, true);
+        g_Animator.TriggerViewTransition();
+    } else {
+        float tx = 0.0f, tw = 80.0f;
+        if (g_Renderer.GetSettingsTabRect(g_Ui.settingsTab, tx, tw)) {
+            g_Animator.SetSettingsTab(tx, tw, !g_SettingsTabSnapped || !g_WindowFocused);
+            g_SettingsTabSnapped = true;
+        }
     }
-    if (!wasOpen) g_Animator.TriggerViewTransition();
     EnsureAnimTimer(hwnd);
     UpdateTriggerPreviewState(hwnd);
 }
@@ -1468,6 +1458,10 @@ void HandleUiAction(HWND hwnd, int a) noexcept {
         if (g_Ui.showSettings) {
             g_Ui.showSettings = false;
             g_SettingsHwTabOpen.store(false, std::memory_order_release);
+            g_Animator.SetSettingsOpen(false);
+            g_Animator.SetSettingsTab(0.0f, 0.0f, true);
+            g_SettingsTabSnapped = false;
+            g_SidebarIndSnapped = false;
             g_Animator.TriggerViewTransition();
             EnsureAnimTimer(hwnd);
             UpdateTriggerPreviewState(hwnd);
@@ -1481,6 +1475,8 @@ void HandleUiAction(HWND hwnd, int a) noexcept {
     } else if (act::InRange(a, act::SidebarFilter, 5)) {
         g_Ui.sidebarFilter = a - act::SidebarFilter;
         g_Ui.listScroll = 0.0f;
+        g_Animator.SetListScrollTarget(0.0f, true);
+        g_SidebarIndSnapped = false;
     } else if (a == act::CycleTopLayer) {
         const uint8_t next = static_cast<uint8_t>((g_SharedState.activeRemapLayer.load(std::memory_order_relaxed) + 1U) & 3U);
         g_SharedState.activeRemapLayer.store(next, std::memory_order_release);
@@ -1634,7 +1630,7 @@ void HandleUiAction(HWND hwnd, int a) noexcept {
             case act::SetToggleTopmost:      st.alwaysOnTop = !st.alwaysOnTop; ApplyAlwaysOnTop(hwnd); break;
             case act::SetToggleBounds:       st.rememberWindowBounds = !st.rememberWindowBounds; break;
             case act::SetToggleConfirmDel:   st.confirmDelete = !st.confirmDelete; break;
-            case act::SetToggleCompact:      st.compactSidebar = !st.compactSidebar; break;
+            case act::SetToggleCompact:      st.compactSidebar = !st.compactSidebar; g_SidebarIndSnapped = false; break;
             case act::SetToggleSignal:       st.showSignalView = !st.showSignalView; break;
             case act::SetToggleLiveKeys:     st.showLiveKeyIndicators = !st.showLiveKeyIndicators; break;
             case act::SetToggleLowRes:       st.lowResourceWhenUnfocused = !st.lowResourceWhenUnfocused; UpdateUiTimerCadence(hwnd); break;
@@ -1650,11 +1646,12 @@ void HandleUiAction(HWND hwnd, int a) noexcept {
     } else if (act::InRange(a, act::SetAnimQuality, 3)) {
         g_Ui.settings.animationQuality = static_cast<uint8_t>(a - act::SetAnimQuality);
         g_Animator.SetQuality(g_Ui.settings.animationQuality);
+        g_Ui.listScroll    = g_Animator.listScrollSmooth.value;
+        g_Ui.seqStepScroll = g_Animator.seqScrollSmooth.value;
         g_Ui.MarkDirty();
         EnsureAnimTimer(hwnd);
     } else if (act::InRange(a, act::SetAccent, 5)) {
         g_Ui.settings.accentPreset = static_cast<uint8_t>(a - act::SetAccent);
-        RefreshAppIcons(hwnd);
         g_Ui.MarkDirty();
     } else if (act::InRange(a, act::SetPowerMode, 3)) {
         g_Ui.settings.powerMode = static_cast<uint8_t>(a - act::SetPowerMode);
@@ -1940,13 +1937,20 @@ void HandleUiAction(HWND hwnd, int a) noexcept {
                 g_Ui.selectedSeqStep = std::clamp(a - act::SelectSeqStep, 0, std::max(0, static_cast<int>(seq.stepCount) - 1));
             } else if (a == act::SeqStepAdd) {
                 if (seq.stepCount < kComplexStepMax) {
+                    const int insertPos = (seq.stepCount == 0U)
+                        ? 0
+                        : std::clamp(g_Ui.selectedSeqStep + 1, 0, static_cast<int>(seq.stepCount));
+                    for (int i = static_cast<int>(seq.stepCount); i > insertPos; --i) {
+                        seq.steps[i] = seq.steps[i - 1];
+                    }
                     ComplexStep ns{};
                     ns.kind = static_cast<uint8_t>(ComplexStepKind::KeyClick);
                     ns.vk = '1';
                     ns.durationMs = 25;
-                    seq.steps[seq.stepCount] = ns;
-                    g_Ui.selectedSeqStep = static_cast<int>(seq.stepCount);
+                    seq.steps[insertPos] = ns;
                     ++seq.stepCount;
+                    g_Ui.selectedSeqStep = insertPos;
+                    EnsureSelectedSeqStepVisible();
                     SyncSelectedSequence();
                 } else {
                     ShowToast(hwnd, L"Maximum 128 steps reached for this sequence.");
@@ -1963,6 +1967,7 @@ void HandleUiAction(HWND hwnd, int a) noexcept {
                     seq.steps[pos] = ns;
                     ++seq.stepCount;
                     g_Ui.selectedSeqStep = pos;
+                    EnsureSelectedSeqStepVisible();
                     SyncSelectedSequence();
                 }
             } else if (a == act::SeqStepDup) {
@@ -1973,19 +1978,36 @@ void HandleUiAction(HWND hwnd, int a) noexcept {
                     }
                     seq.steps[pos + 1] = seq.steps[pos];
                     ++seq.stepCount;
+
+                    const auto dupKind = static_cast<ComplexStepKind>(seq.steps[pos].kind);
+                    if ((dupKind == ComplexStepKind::LoopStart || dupKind == ComplexStepKind::IfCheck) &&
+                        seq.stepCount < kComplexStepMax) {
+                        for (int i = static_cast<int>(seq.stepCount); i > pos + 2; --i) {
+                            seq.steps[i] = seq.steps[i - 1];
+                        }
+                        ComplexStep closer{};
+                        closer.kind = static_cast<uint8_t>(
+                            dupKind == ComplexStepKind::LoopStart ? ComplexStepKind::LoopEnd : ComplexStepKind::EndIf);
+                        seq.steps[pos + 2] = closer;
+                        ++seq.stepCount;
+                    }
+
                     g_Ui.selectedSeqStep = pos + 1;
+                    EnsureSelectedSeqStepVisible();
                     SyncSelectedSequence();
                 }
             } else if (a == act::SeqStepUp) {
                 if (g_Ui.selectedSeqStep > 0 && g_Ui.selectedSeqStep < static_cast<int>(seq.stepCount)) {
                     std::swap(seq.steps[g_Ui.selectedSeqStep], seq.steps[g_Ui.selectedSeqStep - 1]);
                     --g_Ui.selectedSeqStep;
+                    EnsureSelectedSeqStepVisible();
                     SyncSelectedSequence();
                 }
             } else if (a == act::SeqStepDown) {
                 if (g_Ui.selectedSeqStep >= 0 && g_Ui.selectedSeqStep + 1 < static_cast<int>(seq.stepCount)) {
                     std::swap(seq.steps[g_Ui.selectedSeqStep], seq.steps[g_Ui.selectedSeqStep + 1]);
                     ++g_Ui.selectedSeqStep;
+                    EnsureSelectedSeqStepVisible();
                     SyncSelectedSequence();
                 }
             } else if (a == act::SeqStepDel) {
@@ -1995,13 +2017,17 @@ void HandleUiAction(HWND hwnd, int a) noexcept {
                     }
                     --seq.stepCount;
                     g_Ui.selectedSeqStep = std::clamp(g_Ui.selectedSeqStep, 0, std::max(0, static_cast<int>(seq.stepCount) - 1));
+                    EnsureSelectedSeqStepVisible();
                     SyncSelectedSequence();
                 }
-            } else if (act::InRange(a, act::SeqStepKindBase, 14)) {
+            } else if (act::InRange(a, act::SeqStepKindBase, 17)) {
                 if (g_Ui.selectedSeqStep >= 0 && g_Ui.selectedSeqStep < static_cast<int>(seq.stepCount)) {
-                    auto& st = seq.steps[g_Ui.selectedSeqStep];
+                    const int pos = g_Ui.selectedSeqStep;
+                    auto& st = seq.steps[pos];
+                    const auto prevKind = static_cast<ComplexStepKind>(st.kind);
                     st.kind = static_cast<uint8_t>(a - act::SeqStepKindBase);
                     const auto nk = static_cast<ComplexStepKind>(st.kind);
+
                     if (nk == ComplexStepKind::MouseScroll && (st.param == 0U || static_cast<int32_t>(st.param) > 120 || static_cast<int32_t>(st.param) < -120)) {
                         st.param = 1U;
                     }
@@ -2009,8 +2035,134 @@ void HandleUiAction(HWND hwnd, int a) noexcept {
                         st.durationMs = 0U;
                         if (st.param == 0U) st.param = 3000U;
                     }
-                    if (nk == ComplexStepKind::LoopStart && st.param == 0U) st.param = 3U;
+                    if (nk == ComplexStepKind::LoopStart && (prevKind != ComplexStepKind::LoopStart || st.param == 0U)) {
+                        st.param = 3U;
+                    }
+                    if (nk == ComplexStepKind::IfCheck && prevKind != ComplexStepKind::IfCheck) {
+                        mask::core::SetStepConditionKind(st, ComplexConditionKind::KeyHeld);
+                        mask::core::SetStepConditionNegated(st, false);
+                        if (st.vk == 0U) st.vk = VK_LSHIFT;
+                        if (st.tolerance == 0U) st.tolerance = 24U;
+                    }
                     if (nk == ComplexStepKind::KeyClick && st.vk == 0U) st.vk = '1';
+
+                    auto removeStepAt = [&](int rIdx) noexcept {
+                        for (int i = rIdx; i + 1 < static_cast<int>(seq.stepCount); ++i) {
+                            seq.steps[i] = seq.steps[i + 1];
+                        }
+                        --seq.stepCount;
+                    };
+
+                    // Empty adjacent closer cleanup when switching away from LoopStart or IfCheck
+                    if (prevKind == ComplexStepKind::LoopStart && nk != ComplexStepKind::LoopStart) {
+                        if (pos + 1 < static_cast<int>(seq.stepCount) &&
+                            seq.steps[pos + 1].kind == static_cast<uint8_t>(ComplexStepKind::LoopEnd) &&
+                            CountStepKind(seq, ComplexStepKind::LoopEnd) > CountStepKind(seq, ComplexStepKind::LoopStart)) {
+                            removeStepAt(pos + 1);
+                        }
+                    } else if (prevKind == ComplexStepKind::IfCheck && nk != ComplexStepKind::IfCheck) {
+                        if (pos + 1 < static_cast<int>(seq.stepCount) &&
+                            seq.steps[pos + 1].kind == static_cast<uint8_t>(ComplexStepKind::EndIf) &&
+                            CountStepKind(seq, ComplexStepKind::EndIf) > CountStepKind(seq, ComplexStepKind::IfCheck)) {
+                            removeStepAt(pos + 1);
+                        }
+                    }
+
+                    // Auto-spawn matching closer for LoopStart / IfCheck
+                    if (nk == ComplexStepKind::LoopStart && prevKind != ComplexStepKind::LoopStart) {
+                        if (CountStepKind(seq, ComplexStepKind::LoopStart) > CountStepKind(seq, ComplexStepKind::LoopEnd)) {
+                            if (seq.stepCount < kComplexStepMax) {
+                                for (int i = static_cast<int>(seq.stepCount); i > pos + 1; --i) {
+                                    seq.steps[i] = seq.steps[i - 1];
+                                }
+                                ComplexStep endSt{};
+                                endSt.kind = static_cast<uint8_t>(ComplexStepKind::LoopEnd);
+                                seq.steps[pos + 1] = endSt;
+                                ++seq.stepCount;
+                                g_Ui.selectedSeqStep = pos;
+                                EnsureSelectedSeqStepVisible();
+                                ShowToast(hwnd, L"Added matching End loop step.");
+                            } else {
+                                ShowToast(hwnd, L"Sequence is full (128 steps); couldn\u2019t auto-add End loop.");
+                            }
+                        }
+                    } else if (nk == ComplexStepKind::IfCheck && prevKind != ComplexStepKind::IfCheck) {
+                        if (CountStepKind(seq, ComplexStepKind::IfCheck) > CountStepKind(seq, ComplexStepKind::EndIf)) {
+                            if (seq.stepCount < kComplexStepMax) {
+                                for (int i = static_cast<int>(seq.stepCount); i > pos + 1; --i) {
+                                    seq.steps[i] = seq.steps[i - 1];
+                                }
+                                ComplexStep endSt{};
+                                endSt.kind = static_cast<uint8_t>(ComplexStepKind::EndIf);
+                                seq.steps[pos + 1] = endSt;
+                                ++seq.stepCount;
+                                g_Ui.selectedSeqStep = pos;
+                                EnsureSelectedSeqStepVisible();
+                                ShowToast(hwnd, L"Added matching End if step.");
+                            } else {
+                                ShowToast(hwnd, L"Sequence is full (128 steps); couldn\u2019t auto-add End if.");
+                            }
+                        }
+                    }
+                    SyncSelectedSequence();
+                }
+            } else if (act::InRange(a, act::SeqStepCondKind, 6)) {
+                if (g_Ui.selectedSeqStep >= 0 && g_Ui.selectedSeqStep < static_cast<int>(seq.stepCount)) {
+                    auto& st = seq.steps[g_Ui.selectedSeqStep];
+                    const auto ck = static_cast<ComplexConditionKind>(a - act::SeqStepCondKind);
+                    mask::core::SetStepConditionKind(st, ck);
+                    if (ck == ComplexConditionKind::KeyHeld) {
+                        if (st.vk == 0U) st.vk = VK_LSHIFT;
+                    } else if (ck == ComplexConditionKind::ColorMatches) {
+                        if (st.tolerance == 0U) st.tolerance = 24U;
+                    } else if (ck == ComplexConditionKind::LayerIs ||
+                               ck == ComplexConditionKind::UnlockStateIs ||
+                               ck == ComplexConditionKind::MacroActive) {
+                        st.param = 0U;
+                    } else if (ck == ComplexConditionKind::RandomChance) {
+                        if (st.param < 1U || st.param > 99U) st.param = 50U;
+                    }
+                    if (ck == ComplexConditionKind::UnlockStateIs) {
+                        mask::core::SetStepConditionNegated(st, false);
+                    }
+                    SyncSelectedSequence();
+                }
+            } else if (act::InRange(a, act::SeqStepCondNegate, 2)) {
+                if (g_Ui.selectedSeqStep >= 0 && g_Ui.selectedSeqStep < static_cast<int>(seq.stepCount)) {
+                    mask::core::SetStepConditionNegated(seq.steps[g_Ui.selectedSeqStep], (a - act::SeqStepCondNegate) != 0);
+                    SyncSelectedSequence();
+                }
+            } else if (act::InRange(a, act::SeqStepCondUnlock, 2)) {
+                if (g_Ui.selectedSeqStep >= 0 && g_Ui.selectedSeqStep < static_cast<int>(seq.stepCount)) {
+                    auto& st = seq.steps[g_Ui.selectedSeqStep];
+                    st.param = static_cast<uint32_t>(a - act::SeqStepCondUnlock);
+                    mask::core::SetStepConditionNegated(st, false);
+                    SyncSelectedSequence();
+                }
+            } else if (a == act::SeqStepCondAddElse) {
+                if (g_Ui.selectedSeqStep >= 0 && g_Ui.selectedSeqStep < static_cast<int>(seq.stepCount)) {
+                    const int pos = g_Ui.selectedSeqStep;
+                    if (seq.steps[pos].kind == static_cast<uint8_t>(ComplexStepKind::IfCheck) &&
+                        !HasElseInIfBlock(seq, pos) &&
+                        seq.stepCount < kComplexStepMax) {
+                        const int endIdx = FindMatchingEndIf(seq, pos);
+                        const int insertAt = (endIdx >= 0) ? endIdx : (pos + 1);
+                        for (int i = static_cast<int>(seq.stepCount); i > insertAt; --i) {
+                            seq.steps[i] = seq.steps[i - 1];
+                        }
+                        ComplexStep elseSt{};
+                        elseSt.kind = static_cast<uint8_t>(ComplexStepKind::ElseBranch);
+                        seq.steps[insertAt] = elseSt;
+                        ++seq.stepCount;
+                        g_Ui.selectedSeqStep = insertAt;
+                        EnsureSelectedSeqStepVisible();
+                        SyncSelectedSequence();
+                    }
+                }
+            } else if (act::InRange(a, act::SeqStepCondQuickPct, 4)) {
+                static constexpr uint32_t kPcts[4] = { 10U, 25U, 50U, 75U };
+                if (g_Ui.selectedSeqStep >= 0 && g_Ui.selectedSeqStep < static_cast<int>(seq.stepCount)) {
+                    seq.steps[g_Ui.selectedSeqStep].param = kPcts[a - act::SeqStepCondQuickPct];
                     SyncSelectedSequence();
                 }
             } else if (act::InRange(a, act::SeqStepLayer, kRemapLayerCount)) {
@@ -2068,13 +2220,18 @@ void HandleUiAction(HWND hwnd, int a) noexcept {
                 t.r = p.r;
                 t.g = p.g;
                 t.b = p.b;
-                t.mode = 0U;
+                if (t.mode == static_cast<uint8_t>(ColorTriggerMode::ColorChanged)) {
+                    t.mode = static_cast<uint8_t>(ColorTriggerMode::MatchColor);
+                }
                 SyncSelectedTrigger();
             } else if (act::InRange(a, act::TrigMode, 2)) {
                 t.mode = static_cast<uint8_t>(a - act::TrigMode);
                 SyncSelectedTrigger();
-            } else if (act::InRange(a, act::TrigRadius, 4)) {
-                static constexpr uint8_t kRadVals[4] = { 0U, 1U, 2U, 4U };
+            } else if (act::InRange(a, act::TrigMatchRule, 2)) {
+                mask::core::SetTriggerMatchRule(t, static_cast<ColorTriggerMatchRule>(a - act::TrigMatchRule));
+                SyncSelectedTrigger();
+            } else if (act::InRange(a, act::TrigRadius, 5)) {
+                static constexpr uint8_t kRadVals[5] = { 0U, 1U, 2U, 4U, 7U };
                 t.sampleRadius = kRadVals[a - act::TrigRadius];
                 SyncSelectedTrigger();
             } else if (act::InRange(a, act::TrigMonitor, 8)) {
@@ -2413,24 +2570,17 @@ void GameInputThreadMain(std::atomic<bool>* inputReadyFlag) noexcept {
 //  Window Chrome, Frame State & Timers
 // =====================================================================================
 
-constexpr DWORD kDwmUseImmersiveDarkMode   = 20;
-constexpr DWORD kDwmWindowCornerPreference = 33;
-constexpr DWORD kDwmBorderColor            = 34;
-constexpr DWORD kDwmCaptionColor           = 35;
-constexpr DWORD kDwmTextColor              = 36;
-constexpr int   kDwmCornerRound            = 2;
-
-void ApplyWindowChrome(HWND hwnd) noexcept {
+void ApplyWin11Chrome(HWND hwnd) noexcept {
     const BOOL dark = TRUE;
-    DwmSetWindowAttribute(hwnd, kDwmUseImmersiveDarkMode, &dark, sizeof(dark));
-    const int corner = kDwmCornerRound;
-    DwmSetWindowAttribute(hwnd, kDwmWindowCornerPreference, &corner, sizeof(corner));
-    const COLORREF caption = theme::ToColorRef(theme::Window);
-    const COLORREF border  = theme::ToColorRef(theme::Line);
-    const COLORREF text    = theme::ToColorRef(theme::Muted);
-    DwmSetWindowAttribute(hwnd, kDwmCaptionColor, &caption, sizeof(caption));
-    DwmSetWindowAttribute(hwnd, kDwmBorderColor, &border, sizeof(border));
-    DwmSetWindowAttribute(hwnd, kDwmTextColor, &text, sizeof(text));
+    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    const DWM_WINDOW_CORNER_PREFERENCE corner = DWMWCP_ROUND;
+    DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
+    const COLORREF caption = RGB(0x03, 0x07, 0x12);
+    const COLORREF border  = RGB(0x15, 0x36, 0x5C);
+    const COLORREF text    = RGB(0xE2, 0xF1, 0xFF);
+    DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
+    DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border, sizeof(border));
+    DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &text, sizeof(text));
 }
 
 [[nodiscard]] uint32_t SelectedSlotPhysHeldMask() noexcept {
@@ -2469,7 +2619,7 @@ void ApplyWindowChrome(HWND hwnd) noexcept {
     return 0U;
 }
 
-[[nodiscard]] FrameState CurrentFrameState() noexcept {
+[[nodiscard]] FrameState BuildFrameState(HWND hwnd) noexcept {
     const mask::core::TelemetrySnapshot snap = g_SharedState.ReadTelemetry();
     FrameState frame{};
     frame.firingMask       = snap.activeSlotBitmask | snap.toggledSlotBitmask;
@@ -2482,6 +2632,7 @@ void ApplyWindowChrome(HWND hwnd) noexcept {
     frame.activeRemapLayer = g_SharedState.activeRemapLayer.load(std::memory_order_relaxed);
     frame.remapUnlocked    = g_SharedState.remapUnlocked.load(std::memory_order_relaxed);
     frame.paused           = g_SharedState.automationPaused.load(std::memory_order_acquire);
+    frame.windowFocused    = g_WindowFocused && (hwnd == nullptr || (!IsIconic(hwnd) && !g_HiddenToTray));
     frame.bindTarget       = g_SharedState.captureBindTarget.load(std::memory_order_acquire);
     frame.safeStopReason   = g_SharedState.safeStopReason.load(std::memory_order_acquire);
     frame.snap             = snap;
@@ -2509,15 +2660,20 @@ void SaveCurrentWindowBounds(HWND hwnd) noexcept {
 }
 
 void OnAnimTimer(HWND hwnd) noexcept {
-    const bool stillRunning = g_Animator.Tick(mask::ui::UiAnimator::NowSeconds());
+    const bool windowActive = !IsIconic(hwnd) && IsWindowVisible(hwnd) && !g_HiddenToTray;
+    const bool stillRunning = g_Animator.Tick(mask::ui::UiAnimator::NowSeconds(), g_WindowFocused, windowActive);
+    g_Ui.listScroll    = g_Animator.listScrollSmooth.value;
+    g_Ui.seqStepScroll = g_Animator.seqScrollSmooth.value;
+
     int finishedDelId = -1;
     if (g_Animator.ConsumeFinishedDelete(finishedDelId)) {
         FinalizeItemDelete(hwnd, finishedDelId);
     }
-    if (!IsIconic(hwnd) && IsWindowVisible(hwnd)) {
+    if (windowActive) {
         InvalidateRect(hwnd, nullptr, FALSE);
     }
-    if (!stillRunning && !g_Animator.IsAnimating()) {
+    const bool allowAnim = windowActive && (g_WindowFocused || !g_Ui.settings.lowResourceWhenUnfocused);
+    if (!allowAnim || (!stillRunning && !g_Animator.IsAnimating(g_WindowFocused, windowActive))) {
         KillTimer(hwnd, kAnimTimerId);
         g_AnimTimerActive = false;
     }
@@ -2544,10 +2700,12 @@ void OnUiTimer(HWND hwnd) noexcept {
         repaint = true;
     }
 
+    const bool visible = !IsIconic(hwnd) && IsWindowVisible(hwnd) && !g_HiddenToTray;
+    const bool lowPowerUnfocused = !g_WindowFocused && g_Ui.settings.lowResourceWhenUnfocused;
+
     if (g_Ui.toast[0] != L'\0' && now - g_Ui.toastTick > kToastLifetimeMs &&
         g_SharedState.captureBindTarget.load(std::memory_order_relaxed) == 0U) {
-        const bool canAnimateToast = !IsIconic(hwnd) && IsWindowVisible(hwnd) && !g_HiddenToTray &&
-                                     (g_WindowFocused || !g_Ui.settings.lowResourceWhenUnfocused);
+        const bool canAnimateToast = visible && (g_WindowFocused || !g_Ui.settings.lowResourceWhenUnfocused);
         if (!canAnimateToast) {
             g_Animator.SetToastVisible(false, true);
             g_Ui.ClearToast();
@@ -2558,31 +2716,44 @@ void OnUiTimer(HWND hwnd) noexcept {
                 g_Ui.ClearToast();
             }
         }
-        repaint = true;
+        if (visible) {
+            repaint = true;
+        }
     }
 
-    // Live UI updates only when visible and not minimized
-    if (!IsIconic(hwnd) && IsWindowVisible(hwnd) && !g_HiddenToTray) {
+    // Live UI updates only when visible and not throttled in unfocused low-resource mode
+    if (visible) {
         const uint16_t seqMask = g_SeqEnginePtr != nullptr ? g_SeqEnginePtr->GetActiveSequenceBitmask() : 0U;
         const uint8_t layer    = g_SharedState.activeRemapLayer.load(std::memory_order_relaxed);
         const bool unlocked    = g_SharedState.remapUnlocked.load(std::memory_order_relaxed);
-        if (seqMask != g_LastActiveSeqMask || seqMask != 0U || layer != g_LastActiveRemapLayer || unlocked != g_LastRemapUnlocked) {
+        if (seqMask != g_LastActiveSeqMask || layer != g_LastActiveRemapLayer || unlocked != g_LastRemapUnlocked ||
+            (!lowPowerUnfocused && seqMask != 0U)) {
+            if (seqMask != g_LastActiveSeqMask) {
+                g_LastFiringSeqMask = seqMask;
+                const bool snapPulse = lowPowerUnfocused;
+                for (int i = 0; i < kComplexSeqCount; ++i) {
+                    g_Animator.SetFiring(AnimSlotFor(ItemKind::Sequence, i), (seqMask & (1U << i)) != 0U, snapPulse);
+                }
+                if (!snapPulse) EnsureAnimTimer(hwnd);
+            }
             g_LastActiveSeqMask = seqMask;
             g_LastActiveRemapLayer = layer;
             g_LastRemapUnlocked = unlocked;
             repaint = true;
         }
-        if (g_Ui.showSettings && g_Ui.settingsTab == 4) {
-            const uint64_t seq = g_SharedState.telemetrySequence.load(std::memory_order_acquire);
-            if ((seq & 1ULL) == 0ULL && seq != g_LastUiTelemetrySeq) {
-                g_LastUiTelemetrySeq = seq;
-                repaint = true;
-            }
-        } else {
-            const uint32_t heldMask = SelectedSlotPhysHeldMask();
-            if (heldMask != g_LastUiPhysHeldMask) {
-                g_LastUiPhysHeldMask = heldMask;
-                repaint = true;
+        if (!lowPowerUnfocused) {
+            if (g_Ui.showSettings && g_Ui.settingsTab == 4) {
+                const uint64_t seq = g_SharedState.telemetrySequence.load(std::memory_order_acquire);
+                if ((seq & 1ULL) == 0ULL && seq != g_LastUiTelemetrySeq) {
+                    g_LastUiTelemetrySeq = seq;
+                    repaint = true;
+                }
+            } else {
+                const uint32_t heldMask = SelectedSlotPhysHeldMask();
+                if (heldMask != g_LastUiPhysHeldMask) {
+                    g_LastUiPhysHeldMask = heldMask;
+                    repaint = true;
+                }
             }
         }
     }
@@ -2604,7 +2775,7 @@ void OnUiTimer(HWND hwnd) noexcept {
         repaint = true;
     }
 
-    if (repaint && !IsIconic(hwnd) && IsWindowVisible(hwnd)) {
+    if (repaint && visible) {
         InvalidateRect(hwnd, nullptr, FALSE);
     }
 }
@@ -2636,42 +2807,59 @@ void PasteClipboardIntoEditBuffer(size_t maxLen) noexcept {
 LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) noexcept {
     switch (msg) {
         case WM_CREATE:
-            ApplyWindowChrome(hwnd);
             g_Renderer.Initialize(hwnd);
+            RefreshAppIcons(hwnd);
+            ApplyWin11Chrome(hwnd);
             WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
             AddTrayIcon(hwnd);
             g_Animator.SetQuality(g_Ui.settings.animationQuality);
             SyncAnimatorToggles(true);
+            g_Animator.SetSettingsOpen(g_Ui.showSettings, true);
             g_Animator.TriggerAppOpen();
             UpdateUiTimerCadence(hwnd);
             EnsureAnimTimer(hwnd);
             return 0;
 
         case WM_SIZE:
-            g_Renderer.OnResize(LOWORD(lParam), HIWORD(lParam));
             if (wParam == SIZE_MINIMIZED) {
                 g_WindowFocused = false;
+                g_Animator.SetCursorPosition(g_Animator.cursorX.value, g_Animator.cursorY.value, false, true);
+                g_Animator.OnPointerUp();
+                g_Animator.appOpen.Snap(g_Animator.appOpen.target);
+                g_Animator.viewTransition.Snap(g_Animator.viewTransition.target);
+                g_Animator.SnapAll();
+                int finishedDelId = -1;
+                if (g_Animator.ConsumeFinishedDelete(finishedDelId)) {
+                    FinalizeItemDelete(hwnd, finishedDelId);
+                }
                 if (g_Ui.settings.minimizeToTray) {
                     HideToTray(hwnd);
                 } else {
+                    g_Renderer.TrimGpu();
                     UpdateUiTimerCadence(hwnd);
                     StartTrimTimerIfEnabled(hwnd);
                 }
             } else {
+                g_Renderer.Resize(LOWORD(lParam), HIWORD(lParam));
                 CancelTrimTimer(hwnd);
                 g_SettingsTabSnapped = false;
+                g_SidebarIndSnapped = false;
                 UpdateUiTimerCadence(hwnd);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
 
         case WM_DPICHANGED: {
-            g_Renderer.OnDpiChanged(HIWORD(wParam));
+            g_Renderer.SetDpi(static_cast<float>(HIWORD(wParam)));
+            RefreshAppIcons(hwnd);
             const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
-            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
-                         suggested->right - suggested->left, suggested->bottom - suggested->top,
-                         SWP_NOZORDER | SWP_NOACTIVATE);
+            if (suggested != nullptr) {
+                SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                             suggested->right - suggested->left, suggested->bottom - suggested->top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
             g_SettingsTabSnapped = false;
+            g_SidebarIndSnapped = false;
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -2693,18 +2881,36 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             BeginPaint(hwnd, &ps);
-            if (!IsIconic(hwnd) && IsWindowVisible(hwnd)) {
+            if (!IsIconic(hwnd) && IsWindowVisible(hwnd) && !g_HiddenToTray) {
                 g_LastUiPhysHeldMask = SelectedSlotPhysHeldMask();
                 g_LastUiTelemetrySeq = g_SharedState.telemetrySequence.load(std::memory_order_acquire);
-                g_Renderer.Render(CurrentFrameState());
-                if (g_Ui.showSettings && !g_SettingsTabSnapped) {
+                g_Renderer.Render(g_Ui, BuildFrameState(hwnd), g_Animator);
+
+                g_Animator.ClampScrollTargets(g_Renderer.ListMaxScroll(), g_Renderer.SeqStepMaxScroll());
+                g_Ui.listScroll    = g_Animator.listScrollSmooth.value;
+                g_Ui.seqStepScroll = g_Animator.seqScrollSmooth.value;
+
+                if (g_Ui.showSettings) {
+                    g_SidebarIndSnapped = false;
                     float tx = 0.0f, tw = 80.0f;
-                    g_Renderer.QuerySettingsTabRect(g_Ui.settingsTab, tx, tw);
-                    if (tx > 1.0f) {
-                        g_Animator.SetSettingsTab(tx, tw, true);
+                    if (g_Renderer.GetSettingsTabRect(g_Ui.settingsTab, tx, tw)) {
+                        const bool snapTab = !g_SettingsTabSnapped || !g_WindowFocused;
+                        g_Animator.SetSettingsTab(tx, tw, snapTab);
                         g_SettingsTabSnapped = true;
                     }
+                } else {
+                    g_SettingsTabSnapped = false;
+                    float indY = 0.0f, indH = 0.0f;
+                    if (g_Renderer.GetSelectedSidebarRowRect(indY, indH)) {
+                        const bool snapInd = !g_SidebarIndSnapped || !g_WindowFocused;
+                        g_Animator.SetSidebarIndicator(indY, indH, snapInd);
+                        g_SidebarIndSnapped = true;
+                    } else {
+                        g_Animator.SetSidebarIndicator(0.0f, 0.0f, true);
+                        g_SidebarIndSnapped = false;
+                    }
                 }
+                EnsureAnimTimer(hwnd);
             }
             EndPaint(hwnd, &ps);
             return 0;
@@ -2732,41 +2938,56 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return DefWindowProcW(hwnd, msg, wParam, lParam);
 
         case WM_MOUSEMOVE: {
+            const int xPx = GET_X_LPARAM(lParam);
+            const int yPx = GET_Y_LPARAM(lParam);
+            const float scale = g_Renderer.Scale();
+            const float dipX = static_cast<float>(xPx) / scale;
+            const float dipY = static_cast<float>(yPx) / scale;
+
+            TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, hwnd, 0 };
+            TrackMouseEvent(&tme);
+            if (g_WindowFocused) {
+                g_Animator.SetCursorPosition(dipX, dipY, true);
+            }
+
             if (g_Ui.triggerColorPickActive) {
                 POINT pt{};
                 if (GetCursorPos(&pt)) {
                     SampleTriggerEyedropperLoupe(pt.x, pt.y);
                 }
+                EnsureAnimTimer(hwnd);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
             if (g_Ui.draggingDuty) {
-                ApplyDutyFromPointer(GET_X_LPARAM(lParam));
+                ApplyDutyFromPointer(xPx);
+                EnsureAnimTimer(hwnd);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
             if (g_Ui.draggingTriggerSlider != 0) {
-                ApplyTriggerSliderFromPointer(GET_X_LPARAM(lParam));
+                ApplyTriggerSliderFromPointer(xPx);
+                EnsureAnimTimer(hwnd);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
-            TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, hwnd, 0 };
-            TrackMouseEvent(&tme);
-            const int hit = g_Renderer.HitTest(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            const int hit = g_Renderer.HitTest(dipX, dipY);
             if (hit != g_Ui.hoveredAction) {
                 g_Ui.hoveredAction = hit;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
+            EnsureAnimTimer(hwnd);
             return 0;
         }
 
         case WM_MOUSELEAVE:
             g_Animator.OnPointerUp();
+            g_Animator.SetCursorPosition(g_Animator.cursorX.target, g_Animator.cursorY.target, false, !g_WindowFocused);
             EnsureAnimTimer(hwnd);
             if (g_Ui.hoveredAction != act::None && !g_Ui.draggingDuty && g_Ui.draggingTriggerSlider == 0) {
                 g_Ui.hoveredAction = act::None;
-                InvalidateRect(hwnd, nullptr, FALSE);
             }
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
 
         case WM_LBUTTONDOWN: {
@@ -2794,8 +3015,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                         st.b = b;
                         SyncSelectedSequence();
                         wchar_t pickMsg[96]{};
-                        std::swprintf(pickMsg, std::size(pickMsg), L"Picked #%02X%02X%02X at (%d, %d).",
-                                      static_cast<unsigned>(r), static_cast<unsigned>(g), static_cast<unsigned>(b),
+                        std::swprintf(pickMsg, std::size(pickMsg), L"Picked color at (%d, %d).",
                                       static_cast<int>(pt.x), static_cast<int>(pt.y));
                         ShowToast(hwnd, pickMsg);
                     }
@@ -2804,11 +3024,18 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 return 0;
             }
 
-            const int hit = g_Renderer.HitTest(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            const int xPx = GET_X_LPARAM(lParam);
+            const int yPx = GET_Y_LPARAM(lParam);
+            const float scale = g_Renderer.Scale();
+            const float dipX = static_cast<float>(xPx) / scale;
+            const float dipY = static_cast<float>(yPx) / scale;
+
+            g_Animator.TriggerRipple(dipX, dipY, mask::ui::GetAccentPalette(g_Ui.settings.accentPreset).signalHi);
+            const int hit = g_Renderer.HitTest(dipX, dipY);
             if (hit != act::None && hit != act::ModalSurface && hit != act::PopoverBackdrop) {
                 g_Animator.OnPointerDown(hit);
-                EnsureAnimTimer(hwnd);
             }
+            EnsureAnimTimer(hwnd);
 
             const uint8_t bindTarget = g_SharedState.captureBindTarget.load(std::memory_order_acquire);
             if (bindTarget != 0U && hit == BindActionFor(bindTarget)) {
@@ -2822,7 +3049,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 if (bindTarget != 0U) CancelBinding();
                 g_Ui.draggingDuty = true;
                 SetCapture(hwnd);
-                ApplyDutyFromPointer(GET_X_LPARAM(lParam));
+                ApplyDutyFromPointer(xPx);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
@@ -2833,13 +3060,16 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 if (bindTarget != 0U) CancelBinding();
                 g_Ui.draggingTriggerSlider = hit;
                 SetCapture(hwnd);
-                ApplyTriggerSliderFromPointer(GET_X_LPARAM(lParam));
+                ApplyTriggerSliderFromPointer(xPx);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
 
             if (hit != act::None) {
                 HandleUiAction(hwnd, hit);
+                if (hit == act::ModalSurface) {
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
             } else {
                 if (g_Ui.editField != Field::None) CommitEdit();
                 if (bindTarget != 0U) {
@@ -2882,11 +3112,16 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_MOUSEWHEEL: {
             POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             ScreenToClient(hwnd, &pt);
+            const float scale = g_Renderer.Scale();
+            const float dipX = static_cast<float>(pt.x) / scale;
+            const float dipY = static_cast<float>(pt.y) / scale;
             const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             const int dir = (delta > 0) ? 1 : -1;
             const WORD keys = GET_KEYSTATE_WPARAM(wParam);
-            const int hit = g_Renderer.HitTest(pt.x, pt.y);
+            const int hit = g_Renderer.HitTest(dipX, dipY);
             const bool onField = act::InRange(hit, act::FieldFocus, 64) && !IsTextField(static_cast<Field>(hit - act::FieldFocus));
+            const bool snapScroll = !g_WindowFocused ||
+                g_Ui.settings.animationQuality == static_cast<uint8_t>(mask::settings::AnimationQuality::Off);
             if (onField || (hit == act::DutySlider && g_Ui.selectedKind == ItemKind::Macro)) {
                 const Field f = onField ? static_cast<Field>(hit - act::FieldFocus) : Field::Duty;
                 if (g_Ui.editField == f) CancelEdit();
@@ -2896,14 +3131,22 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 const int step = ((keys & MK_SHIFT) != 0 ? 10 : 1) * dir;
                 t.tolerance = static_cast<uint8_t>(std::clamp(static_cast<int>(t.tolerance) + step, 0, 150));
                 SyncSelectedTrigger();
-            } else if (g_Renderer.PointInSeqList(pt.x, pt.y)) {
+            } else if (g_Renderer.PointInSeqList(dipX, dipY)) {
                 const float pitch = UiRenderer::kSeqStepRowH + 4.0f;
-                g_Ui.seqStepScroll = std::clamp(g_Ui.seqStepScroll - static_cast<float>(delta) / 120.0f * pitch * 2.0f,
-                                                0.0f, g_Renderer.SeqStepMaxScroll());
-            } else if (g_Renderer.PointInList(pt.x, pt.y)) {
+                const float nextScroll = std::clamp(
+                    g_Animator.seqScrollSmooth.target - static_cast<float>(delta) / 120.0f * pitch * 2.0f,
+                    0.0f, g_Renderer.SeqStepMaxScroll());
+                g_Animator.SetSeqScrollTarget(nextScroll, snapScroll);
+                if (snapScroll) g_Ui.seqStepScroll = g_Animator.seqScrollSmooth.value;
+                EnsureAnimTimer(hwnd);
+            } else if (g_Renderer.PointInList(dipX, dipY)) {
                 const float pitch = g_Renderer.CurrentListRowHeight() + UiRenderer::kListRowGap;
-                g_Ui.listScroll = std::clamp(g_Ui.listScroll - static_cast<float>(delta) / 120.0f * pitch,
-                                             0.0f, g_Renderer.ListMaxScroll());
+                const float nextScroll = std::clamp(
+                    g_Animator.listScrollSmooth.target - static_cast<float>(delta) / 120.0f * pitch,
+                    0.0f, g_Renderer.ListMaxScroll());
+                g_Animator.SetListScrollTarget(nextScroll, snapScroll);
+                if (snapScroll) g_Ui.listScroll = g_Animator.listScrollSmooth.value;
+                EnsureAnimTimer(hwnd);
             }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -2940,6 +3183,10 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     g_SharedState.captureBindTarget.load(std::memory_order_relaxed) == 0U) {
                     g_Ui.showSettings = false;
                     g_SettingsHwTabOpen.store(false, std::memory_order_release);
+                    g_Animator.SetSettingsOpen(false);
+                    g_Animator.SetSettingsTab(0.0f, 0.0f, true);
+                    g_SettingsTabSnapped = false;
+                    g_SidebarIndSnapped = false;
                     g_Animator.TriggerViewTransition();
                     EnsureAnimTimer(hwnd);
                     UpdateTriggerPreviewState(hwnd);
@@ -3018,6 +3265,16 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 if (g_Ui.triggerColorPickActive) CancelTriggerEyedropper(hwnd);
                 if (g_Ui.draggingDuty || g_Ui.draggingTriggerSlider != 0) ReleaseCapture();
                 g_Animator.OnPointerUp();
+                g_Animator.SetCursorPosition(g_Animator.cursorX.value, g_Animator.cursorY.value, false, true);
+                if (g_Ui.settings.lowResourceWhenUnfocused) {
+                    g_Animator.appOpen.Snap(g_Animator.appOpen.target);
+                    g_Animator.viewTransition.Snap(g_Animator.viewTransition.target);
+                    g_Animator.SnapAll();
+                    int finishedDelId = -1;
+                    if (g_Animator.ConsumeFinishedDelete(finishedDelId)) {
+                        FinalizeItemDelete(hwnd, finishedDelId);
+                    }
+                }
                 UpdateUiTimerCadence(hwnd);
                 InvalidateRect(hwnd, nullptr, FALSE);
             } else {
@@ -3071,8 +3328,13 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             const bool nowPaused   = g_SharedState.automationPaused.load(std::memory_order_acquire);
             const uint8_t nowLayer = g_SharedState.activeRemapLayer.load(std::memory_order_acquire);
             const bool nowUnlocked = g_SharedState.remapUnlocked.load(std::memory_order_acquire);
+            const bool visible = !IsIconic(hwnd) && IsWindowVisible(hwnd) && !g_HiddenToTray;
+            const bool lowPowerUnfocused = !g_WindowFocused && g_Ui.settings.lowResourceWhenUnfocused;
+            bool stateChanged = false;
+
             if (nowPaused != g_LastObservedPaused) {
                 g_LastObservedPaused = nowPaused;
+                stateChanged = true;
                 if (nowPaused) {
                     OnWatchdogAuxCleanup();
                     PlayFeedbackTone(false);
@@ -3085,12 +3347,33 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (nowLayer != g_LastObservedLayer || nowUnlocked != g_LastObservedUnlocked) {
                 g_LastObservedLayer    = nowLayer;
                 g_LastObservedUnlocked = nowUnlocked;
+                stateChanged = true;
                 if (g_RemapEnginePtr != nullptr) {
                     g_RemapEnginePtr->RecomputeSuppressedMask();
                 }
             }
+
+            const mask::core::TelemetrySnapshot tel = g_SharedState.ReadTelemetry();
+            const uint64_t firingMask = tel.activeSlotBitmask | tel.toggledSlotBitmask;
+            const uint16_t seqMask    = g_SeqEnginePtr != nullptr ? g_SeqEnginePtr->GetActiveSequenceBitmask() : 0U;
+            if (firingMask != g_LastFiringMask || seqMask != g_LastFiringSeqMask) {
+                g_LastFiringMask    = firingMask;
+                g_LastFiringSeqMask = seqMask;
+                stateChanged = true;
+                const bool snapPulse = !visible || lowPowerUnfocused;
+                for (int i = 0; i < kSlotCount; ++i) {
+                    g_Animator.SetFiring(AnimSlotFor(ItemKind::Macro, i), (firingMask & (1ULL << i)) != 0ULL, snapPulse);
+                }
+                for (int i = 0; i < kComplexSeqCount; ++i) {
+                    g_Animator.SetFiring(AnimSlotFor(ItemKind::Sequence, i), (seqMask & (1U << i)) != 0U, snapPulse);
+                }
+                if (!snapPulse) {
+                    EnsureAnimTimer(hwnd);
+                }
+            }
+
             UpdateTrayTooltip(hwnd);
-            if (!IsIconic(hwnd) && IsWindowVisible(hwnd) && !g_HiddenToTray) {
+            if (visible && (!lowPowerUnfocused || stateChanged)) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
@@ -3140,6 +3423,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     if (GetCursorPos(&pt)) SampleTriggerEyedropperLoupe(pt.x, pt.y);
                     InvalidateRect(hwnd, nullptr, FALSE);
                 } else if (!IsIconic(hwnd) && IsWindowVisible(hwnd) && !g_HiddenToTray &&
+                           (g_WindowFocused || !g_Ui.settings.lowResourceWhenUnfocused) &&
                            !g_Ui.showSettings && g_Ui.selectedKind == ItemKind::Trigger) {
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
@@ -3316,6 +3600,7 @@ int main(int argc, char* argv[]) {
     // 6. Real-time macro engine thread
     std::thread engineThread(EngineThreadMain, &timingEngine, selfTestOnly);
 
+    bool selfTestOk = true;
     if (selfTestOnly) {
         auto& host = mask::bridge::HIDMaestroHost::Instance();
         host.LoadAndInitialize(L"logitech-g502-hero", L"keychron-q6");
@@ -3325,6 +3610,11 @@ int main(int argc, char* argv[]) {
         int32_t mIdx = -1, kIdx = -1;
         uint8_t kbLeds = 0;
         host.QueryDriverTelemetry(hmLive, hmElev, hmDrv, mIdx, kIdx, hmDeliv, hmRelExit, kbLeds);
+        const bool seqLogicOk = mask::workflows::ComplexSequenceEngine::RunControlFlowSelfTest();
+        double visionAvgUs = 0.0;
+        const bool trigOk = mask::triggers::PixelTriggerEngine::RunTriggerSelfTest(visionAvgUs);
+        const bool remapOk = mask::remap::RemapEngine::RunRemapSelfTest();
+        selfTestOk = seqLogicOk && trigOk && remapOk;
 
         std::printf("\nMask self-test\n");
         std::printf("  Timer frequency     : %.4f GHz\n", static_cast<double>(snap.calibratedTscFreqHz) / 1e9);
@@ -3343,11 +3633,12 @@ int main(int argc, char* argv[]) {
                     static_cast<unsigned>(snap.jitterHistogram[1]),
                     static_cast<unsigned>(snap.jitterHistogram[2]),
                     static_cast<unsigned>(snap.jitterHistogram[3]));
+        std::printf("  Sequence logic: %s\n", seqLogicOk ? "PASS" : "FAIL");
+        std::printf("  Trigger logic: %s (%.2f us/frame)\n", trigOk ? "PASS" : "FAIL", visionAvgUs);
+        std::printf("  Remap logic: %s\n", remapOk ? "PASS" : "FAIL");
     } else {
         const HINSTANCE hInst = GetModuleHandleW(nullptr);
-        const auto pal = mask::ui::GetAccentPalette(g_Ui.settings.accentPreset);
-        g_IconLarge = CreateAppIcon(GetSystemMetrics(SM_CXICON), pal.signal);
-        g_IconSmall = CreateAppIcon(GetSystemMetrics(SM_CXSMICON), pal.signal);
+        RefreshAppIcons(nullptr);
 
         WNDCLASSEXW wc{};
         wc.cbSize        = sizeof(WNDCLASSEXW);
@@ -3433,7 +3724,7 @@ int main(int argc, char* argv[]) {
     g_SeqEnginePtr   = nullptr;
     g_RemapEnginePtr = nullptr;
 
-    watchdog.ExecuteEmergencyRecovery(true);
+    watchdog.ExecuteEmergencyRecovery(false);
     watchdog.Stop();
     g_WatchdogPtr = nullptr;
 
@@ -3446,5 +3737,5 @@ int main(int argc, char* argv[]) {
         ReleaseMutex(instanceMutex);
         CloseHandle(instanceMutex);
     }
-    return 0;
+    return selfTestOnly ? (selfTestOk ? 0 : 1) : 0;
 }

@@ -1,14 +1,19 @@
 #pragma once
 
-// Direct2D Animation & Micro-Interaction Engine for Mask.
+// Direct2D / D3D11 Animation, Cosmic Palette & Micro-Interaction Engine for Mask.
 //
 // Design goals:
-// - 0% idle CPU: every SpringValue and SmoothValue snaps to its target within rest epsilon (0.001f)
-//   and IsAnimating() returns false once all active animations settle.
+// - 0% idle CPU/GPU: every SpringValue and SmoothValue snaps to its target within rest epsilon
+//   (0.001f) and IsAnimating(windowFocused) returns false once transient animations settle whenever
+//   unfocused, minimized, or in Reduced/Off AnimationQuality.
 // - Frame-rate independent: dt is clamped to <= 0.033s and springs sub-step safely so frame hitches
 //   never explode or overshoot erratically.
-// - Quality-aware: supports Full (0), Reduced (1: 2x snappier, no button squeeze), and Off (2: instant
-//   snap, IsAnimating() always false).
+// - Quality-aware:
+//   - Full (0): Smooth ~60fps ambient cosmic drift/starlight & cursor spotlight while focused +
+//               springs, squeeze, firing pulses, and click ripples. Frozen immediately when unfocused.
+//   - Reduced (1): 2x snappier functional springs/scrolls/tabs; sleeps immediately at rest;
+//                  no ambient loop, squeeze, cursor aura, or decorative click ripples.
+//   - Off (2): Instant snap; IsAnimating() always false.
 
 #include "app_settings.hpp"
 
@@ -32,29 +37,42 @@ inline constexpr float kAnimRestEpsilon = 0.001f;
 inline constexpr float kAnimMaxDtSec    = 0.033f;
 
 // =====================================================================================
-//  Accent Theme Palettes (matches mask::settings::AccentPreset)
+//  Cosmic Blue / Black Accent Theme Palettes (0..4 aligned with app_settings.hpp)
+//  0 = CosmicCyan [default], 1 = DeepSapphire, 2 = IceStarlight,
+//  3 = NebulaViolet, 4 = AuroraTeal
 // =====================================================================================
 
 struct AccentPalette {
-    UINT32 signal{0xF2C94C};
-    UINT32 signalHi{0xFFDD75};
-    UINT32 onSignal{0x1E1800};
-    UINT32 secondary{0x5CCFE6};
+    UINT32 signal{0x38BDF8U};
+    UINT32 signalHi{0x7DD3FCU};
+    UINT32 onSignal{0x03111EU};
+    UINT32 secondary{0x22D3EEU};
 };
 
 [[nodiscard]] constexpr AccentPalette GetAccentPalette(uint8_t preset) noexcept {
     switch (static_cast<mask::settings::AccentPreset>(preset)) {
-        case mask::settings::AccentPreset::Cyan:
-            return AccentPalette{ 0x5CCFE6U, 0x8BE3F5U, 0x081B22U, 0xF2C94CU };
-        case mask::settings::AccentPreset::Emerald:
-            return AccentPalette{ 0x5AD696U, 0x83E8B4U, 0x072015U, 0x5CCFE6U };
-        case mask::settings::AccentPreset::Violet:
-            return AccentPalette{ 0xA882FFU, 0xC4A8FFU, 0x160C29U, 0x5CCFE6U };
-        case mask::settings::AccentPreset::Crimson:
-            return AccentPalette{ 0xF0625DU, 0xFF8B87U, 0x260A09U, 0xF2C94CU };
-        case mask::settings::AccentPreset::Amber:
+        case mask::settings::AccentPreset::DeepSapphire:
+            return AccentPalette{ 0x3B82F6U, 0x60A5FAU, 0x031024U, 0x38BDF8U };
+        case mask::settings::AccentPreset::IceStarlight:
+            return AccentPalette{ 0x67E8F9U, 0xE0F7FFU, 0x02131BU, 0x38BDF8U };
+        case mask::settings::AccentPreset::NebulaViolet:
+            return AccentPalette{ 0x818CF8U, 0xA5B4FCU, 0x090C24U, 0x38BDF8U };
+        case mask::settings::AccentPreset::AuroraTeal:
+            return AccentPalette{ 0x2DD4BFU, 0x5EEAD4U, 0x031A17U, 0x38BDF8U };
+        case mask::settings::AccentPreset::CosmicCyan:
         default:
-            return AccentPalette{ 0xF2C94CU, 0xFFDD75U, 0x1E1800U, 0x5CCFE6U };
+            return AccentPalette{ 0x38BDF8U, 0x7DD3FCU, 0x03111EU, 0x22D3EEU };
+    }
+}
+
+[[nodiscard]] constexpr const wchar_t* GetAccentName(uint8_t preset) noexcept {
+    switch (static_cast<mask::settings::AccentPreset>(preset)) {
+        case mask::settings::AccentPreset::DeepSapphire: return L"Deep Sapphire";
+        case mask::settings::AccentPreset::IceStarlight: return L"Ice Starlight";
+        case mask::settings::AccentPreset::NebulaViolet: return L"Nebula Violet";
+        case mask::settings::AccentPreset::AuroraTeal:   return L"Aurora Teal";
+        case mask::settings::AccentPreset::CosmicCyan:
+        default:                                         return L"Cosmic Cyan";
     }
 }
 
@@ -66,10 +84,31 @@ struct AccentPalette {
     const float br = static_cast<float>((b >> 16) & 0xFFU);
     const float bg = static_cast<float>((b >> 8) & 0xFFU);
     const float bb = static_cast<float>(b & 0xFFU);
-    const UINT32 r = static_cast<UINT32>(std::clamp(ar + (br - ar) * t + 0.5f, 0.0f, 255.0f));
-    const UINT32 g = static_cast<UINT32>(std::clamp(ag + (bg - ag) * t + 0.5f, 0.0f, 255.0f));
+    const UINT32 r  = static_cast<UINT32>(std::clamp(ar + (br - ar) * t + 0.5f, 0.0f, 255.0f));
+    const UINT32 g  = static_cast<UINT32>(std::clamp(ag + (bg - ag) * t + 0.5f, 0.0f, 255.0f));
     const UINT32 bl = static_cast<UINT32>(std::clamp(ab + (bb - ab) * t + 0.5f, 0.0f, 255.0f));
     return (r << 16) | (g << 8) | bl;
+}
+
+/// Packs 0xRRGGBB + alpha [0..1] into 0xRRGGBBAA.
+[[nodiscard]] inline UINT32 Rgba(UINT32 rgb, float alpha) noexcept {
+    const float clamped = std::clamp(alpha, 0.0f, 1.0f);
+    const UINT32 a = static_cast<UINT32>(clamped * 255.0f + 0.5f) & 0xFFU;
+    return ((rgb & 0xFFFFFFU) << 8) | a;
+}
+
+/// Packs 0xRRGGBB + alpha byte [0..255] into 0xRRGGBBAA.
+[[nodiscard]] constexpr UINT32 RgbaByte(UINT32 rgb, uint8_t alphaByte) noexcept {
+    return ((rgb & 0xFFFFFFU) << 8) | static_cast<UINT32>(alphaByte);
+}
+
+/// Unpacks 0xRRGGBBAA into a D2D1_COLOR_F.
+[[nodiscard]] inline D2D1_COLOR_F ColorFromRgba(UINT32 rgba, float alphaMul = 1.0f) noexcept {
+    const float r = static_cast<float>((rgba >> 24) & 0xFFU) / 255.0f;
+    const float g = static_cast<float>((rgba >> 16) & 0xFFU) / 255.0f;
+    const float b = static_cast<float>((rgba >> 8) & 0xFFU) / 255.0f;
+    const float a = (static_cast<float>(rgba & 0xFFU) / 255.0f) * std::clamp(alphaMul, 0.0f, 1.0f);
+    return D2D1::ColorF(r, g, b, a);
 }
 
 // =====================================================================================
@@ -165,6 +204,18 @@ struct SmoothValue {
 };
 
 // =====================================================================================
+//  Click Ripple Primitive
+// =====================================================================================
+
+struct ClickRipple {
+    float  x{0.0f};
+    float  y{0.0f};
+    float  progress{0.0f};
+    UINT32 rgb{0x38BDF8U};
+    bool   active{false};
+};
+
+// =====================================================================================
 //  UiAnimator
 // =====================================================================================
 
@@ -176,29 +227,44 @@ public:
     static constexpr size_t kTriggerOffset  = 80;
     static constexpr size_t kRemapOffset    = 88;
     static constexpr size_t kSectionCount   = 8;
+    static constexpr size_t kRippleCount    = 6;
 
     uint8_t quality{static_cast<uint8_t>(mask::settings::AnimationQuality::Full)};
 
-    // App open entrance (0 -> 1 drives fade-in + subtle 14px slide-up)
+    // App open entrance (0 -> 1 drives fade-in + subtle slide-up)
     SmoothValue appOpen{0.0f, 1.0f};
 
     // Button / control squeeze feedback
     int         pressedAction{0};
+    bool        pointerDown{false};
     SpringValue pressScale{1.0f, 1.0f, 0.0f};
 
-    // Per-item toggle switch slides (0=off, 1=on), glows, and row add/delete collapse scales
+    // Per-item toggle slides (0=off, 1=on), glows, row scales, and live firing pulse glows
     std::array<SpringValue, kSlotCount> toggleSlide{};
     std::array<SmoothValue, kSlotCount> toggleGlow{};
     std::array<SmoothValue, kSlotCount> rowScale{};
+    std::array<SmoothValue, kSlotCount> firingPulse{};
     int                                 pendingDeleteId{-1};
 
     // Extension / drawer / popover / tab / toast animations
     SpringValue                            newPickerOpen{0.0f, 0.0f, 0.0f};
+    SpringValue                            settingsOpen{0.0f, 0.0f, 0.0f};
     SmoothValue                            viewTransition{1.0f, 1.0f};
     SpringValue                            settingsTabX{0.0f, 0.0f, 0.0f};
     SpringValue                            settingsTabW{80.0f, 80.0f, 0.0f};
     std::array<SmoothValue, kSectionCount> sectionExpand{};
     SmoothValue                            toastSlide{0.0f, 0.0f};
+
+    // Cosmic Interactive Animations
+    float                                 ambientPhase{0.0f}; // Incremented ONLY when focused && active && quality == Full
+    SpringValue                           sidebarIndY{0.0f, 0.0f, 0.0f};
+    SpringValue                           sidebarIndH{0.0f, 0.0f, 0.0f};
+    SmoothValue                           listScrollSmooth{0.0f, 0.0f};
+    SmoothValue                           seqScrollSmooth{0.0f, 0.0f};
+    SmoothValue                           cursorX{0.0f, 0.0f};
+    SmoothValue                           cursorY{0.0f, 0.0f};
+    SmoothValue                           cursorInside{0.0f, 0.0f};
+    std::array<ClickRipple, kRippleCount> clickRipples{};
 
     UiAnimator() noexcept {
         for (auto& r : rowScale) {
@@ -229,6 +295,14 @@ public:
         } else if (quality == static_cast<uint8_t>(mask::settings::AnimationQuality::Reduced)) {
             pressScale.Snap(1.0f);
             pressedAction = 0;
+            pointerDown = false;
+            cursorInside.Snap(0.0f);
+            cursorX.Snap(cursorX.target);
+            cursorY.Snap(cursorY.target);
+            for (auto& rp : clickRipples) {
+                rp.active = false;
+                rp.progress = 1.0f;
+            }
         }
     }
 
@@ -252,11 +326,16 @@ public:
         return std::clamp(appOpen.value, 0.0f, 1.0f);
     }
 
+    [[nodiscard]] float PressAmount() const noexcept {
+        return std::clamp((1.0f - pressScale.value) / 0.045f, 0.0f, 1.0f);
+    }
+
     void OnPointerDown(int action) noexcept {
         if (action == 0) {
             return;
         }
         pressedAction = action;
+        pointerDown = true;
         if (quality == static_cast<uint8_t>(mask::settings::AnimationQuality::Full)) {
             pressScale.SetTarget(0.955f);
             animating_ = true;
@@ -266,6 +345,7 @@ public:
     }
 
     void OnPointerUp() noexcept {
+        pointerDown = false;
         if (quality == static_cast<uint8_t>(mask::settings::AnimationQuality::Full)) {
             pressScale.SetTarget(1.0f);
             if (!pressScale.IsAtRest()) {
@@ -306,7 +386,9 @@ public:
         } else {
             toggleSlide[slotIndex].SetTarget(target);
             toggleGlow[slotIndex].SetTarget(target);
-            animating_ = true;
+            if (!toggleSlide[slotIndex].IsAtRest() || !toggleGlow[slotIndex].IsAtRest()) {
+                animating_ = true;
+            }
         }
     }
 
@@ -319,7 +401,24 @@ public:
             toggleGlow[slotIndex].Snap(clamped);
         } else {
             toggleGlow[slotIndex].SetTarget(clamped);
-            animating_ = true;
+            if (!toggleGlow[slotIndex].IsAtRest()) {
+                animating_ = true;
+            }
+        }
+    }
+
+    void SetFiring(size_t slotIndex, bool firing, bool snap = false) noexcept {
+        if (slotIndex >= kSlotCount) {
+            return;
+        }
+        const float target = firing ? 1.0f : 0.0f;
+        if (snap || quality == static_cast<uint8_t>(mask::settings::AnimationQuality::Off)) {
+            firingPulse[slotIndex].Snap(target);
+        } else {
+            firingPulse[slotIndex].SetTarget(target);
+            if (!firingPulse[slotIndex].IsAtRest()) {
+                animating_ = true;
+            }
         }
     }
 
@@ -382,7 +481,21 @@ public:
             newPickerOpen.Snap(target);
         } else {
             newPickerOpen.SetTarget(target);
-            animating_ = true;
+            if (!newPickerOpen.IsAtRest()) {
+                animating_ = true;
+            }
+        }
+    }
+
+    void SetSettingsOpen(bool open, bool snap = false) noexcept {
+        const float target = open ? 1.0f : 0.0f;
+        if (snap || quality == static_cast<uint8_t>(mask::settings::AnimationQuality::Off)) {
+            settingsOpen.Snap(target);
+        } else {
+            settingsOpen.SetTarget(target);
+            if (!settingsOpen.IsAtRest()) {
+                animating_ = true;
+            }
         }
     }
 
@@ -403,8 +516,103 @@ public:
         } else {
             settingsTabX.SetTarget(x);
             settingsTabW.SetTarget(w);
+            if (!settingsTabX.IsAtRest() || !settingsTabW.IsAtRest()) {
+                animating_ = true;
+            }
+        }
+    }
+
+    void SetSidebarIndicator(float y, float h, bool snap = false) noexcept {
+        if (snap || quality == static_cast<uint8_t>(mask::settings::AnimationQuality::Off)) {
+            sidebarIndY.Snap(y);
+            sidebarIndH.Snap(h);
+            return;
+        }
+        // When morphing into visibility from an uninitialized/hidden pill, anchor Y immediately
+        // instead of flying in from y=0 at startup.
+        if (sidebarIndH.value <= 0.5f && sidebarIndH.target <= 0.5f && h > 0.5f) {
+            sidebarIndY.Snap(y);
+        } else {
+            sidebarIndY.SetTarget(y);
+        }
+        sidebarIndH.SetTarget(h);
+        if (!sidebarIndY.IsAtRest() || !sidebarIndH.IsAtRest()) {
             animating_ = true;
         }
+    }
+
+    void SetListScrollTarget(float scrollY, bool snap = false) noexcept {
+        const float clamped = std::max(0.0f, scrollY);
+        if (snap || quality == static_cast<uint8_t>(mask::settings::AnimationQuality::Off)) {
+            listScrollSmooth.Snap(clamped);
+        } else {
+            listScrollSmooth.SetTarget(clamped);
+            if (!listScrollSmooth.IsAtRest()) {
+                animating_ = true;
+            }
+        }
+    }
+
+    void SetSeqScrollTarget(float scrollY, bool snap = false) noexcept {
+        const float clamped = std::max(0.0f, scrollY);
+        if (snap || quality == static_cast<uint8_t>(mask::settings::AnimationQuality::Off)) {
+            seqScrollSmooth.Snap(clamped);
+        } else {
+            seqScrollSmooth.SetTarget(clamped);
+            if (!seqScrollSmooth.IsAtRest()) {
+                animating_ = true;
+            }
+        }
+    }
+
+    void ClampScrollTargets(float maxListScroll, float maxSeqScroll) noexcept {
+        const float maxL = std::max(0.0f, maxListScroll);
+        const float maxS = std::max(0.0f, maxSeqScroll);
+        listScrollSmooth.target = std::clamp(listScrollSmooth.target, 0.0f, maxL);
+        listScrollSmooth.value  = std::clamp(listScrollSmooth.value, 0.0f, maxL);
+        seqScrollSmooth.target  = std::clamp(seqScrollSmooth.target, 0.0f, maxS);
+        seqScrollSmooth.value   = std::clamp(seqScrollSmooth.value, 0.0f, maxS);
+    }
+
+    void SetCursorPosition(float dipX, float dipY, bool inside, bool snap = false) noexcept {
+        if (snap || quality != static_cast<uint8_t>(mask::settings::AnimationQuality::Full)) {
+            cursorX.Snap(dipX);
+            cursorY.Snap(dipY);
+            cursorInside.Snap((inside && quality == static_cast<uint8_t>(mask::settings::AnimationQuality::Full)) ? 1.0f : 0.0f);
+            return;
+        }
+        if (inside && cursorInside.value <= 0.01f && cursorInside.target <= 0.01f) {
+            cursorX.Snap(dipX);
+            cursorY.Snap(dipY);
+        } else if (inside) {
+            cursorX.SetTarget(dipX);
+            cursorY.SetTarget(dipY);
+        }
+        cursorInside.SetTarget(inside ? 1.0f : 0.0f);
+        if (!cursorX.IsAtRest() || !cursorY.IsAtRest() || !cursorInside.IsAtRest()) {
+            animating_ = true;
+        }
+    }
+
+    void TriggerRipple(float dipX, float dipY, UINT32 rgb) noexcept {
+        if (quality != static_cast<uint8_t>(mask::settings::AnimationQuality::Full)) {
+            return;
+        }
+        size_t chosen = 0;
+        float oldestProgress = -1.0f;
+        for (size_t i = 0; i < kRippleCount; ++i) {
+            if (!clickRipples[i].active) {
+                chosen = i;
+                oldestProgress = 999.0f;
+                break;
+            }
+            if (clickRipples[i].progress > oldestProgress) {
+                oldestProgress = clickRipples[i].progress;
+                chosen = i;
+            }
+        }
+        clickRipples[chosen] = ClickRipple{ dipX, dipY, 0.0f, rgb, true };
+        animating_ = true;
     }
 
     void SetSectionExpanded(size_t index, bool expanded, bool snap = false) noexcept {
@@ -416,7 +624,9 @@ public:
             sectionExpand[index].Snap(target);
         } else {
             sectionExpand[index].SetTarget(target);
-            animating_ = true;
+            if (!sectionExpand[index].IsAtRest()) {
+                animating_ = true;
+            }
         }
     }
 
@@ -426,7 +636,9 @@ public:
             toastSlide.Snap(target);
         } else {
             toastSlide.SetTarget(target);
-            animating_ = true;
+            if (!toastSlide.IsAtRest()) {
+                animating_ = true;
+            }
         }
     }
 
@@ -434,6 +646,7 @@ public:
         appOpen.Snap(appOpen.target);
         pressScale.Snap(1.0f);
         pressedAction = 0;
+        pointerDown = false;
         for (auto& s : toggleSlide) {
             s.Snap(s.target);
         }
@@ -443,19 +656,36 @@ public:
         for (auto& r : rowScale) {
             r.Snap(r.target);
         }
+        for (auto& fp : firingPulse) {
+            fp.Snap(fp.target);
+        }
         newPickerOpen.Snap(newPickerOpen.target);
+        settingsOpen.Snap(settingsOpen.target);
         viewTransition.Snap(viewTransition.target);
         settingsTabX.Snap(settingsTabX.target);
         settingsTabW.Snap(settingsTabW.target);
+        sidebarIndY.Snap(sidebarIndY.target);
+        sidebarIndH.Snap(sidebarIndH.target);
+        listScrollSmooth.Snap(listScrollSmooth.target);
+        seqScrollSmooth.Snap(seqScrollSmooth.target);
+        cursorX.Snap(cursorX.target);
+        cursorY.Snap(cursorY.target);
+        cursorInside.Snap(cursorInside.target);
         for (auto& e : sectionExpand) {
             e.Snap(e.target);
         }
         toastSlide.Snap(toastSlide.target);
+        for (auto& rp : clickRipples) {
+            rp.active = false;
+            rp.progress = 1.0f;
+        }
         animating_ = false;
         lastTickSec_ = 0.0;
     }
 
-    bool Tick(double nowSec) noexcept {
+    /// Advances active springs, smooth values, click ripples, and (when focused && active && Full)
+    /// the cosmic ambient phase. Returns true while rendering should continue animating.
+    bool Tick(double nowSec, bool windowFocused = true, bool windowActive = true) noexcept {
         if (quality >= static_cast<uint8_t>(mask::settings::AnimationQuality::Off)) {
             SnapAll();
             return false;
@@ -467,52 +697,105 @@ public:
         }
         lastTickSec_ = nowSec;
 
-        const bool reduced = (quality == static_cast<uint8_t>(mask::settings::AnimationQuality::Reduced));
+        const bool full    = (quality == static_cast<uint8_t>(mask::settings::AnimationQuality::Full));
+        const bool reduced = !full;
         const float speedMul = reduced ? 2.0f : 1.0f;
         const float spStiff  = reduced ? 900.0f : 380.0f;
         const float spDamp   = reduced ? 60.0f  : 29.0f;
 
-        bool active = false;
-        active |= appOpen.Step(dt, 11.0f * speedMul);
+        bool transientActive = false;
+        transientActive |= appOpen.Step(dt, 11.0f * speedMul);
 
         if (reduced) {
             pressScale.Snap(1.0f);
             pressedAction = 0;
+            pointerDown = false;
+            cursorX.Snap(cursorX.target);
+            cursorY.Snap(cursorY.target);
+            cursorInside.Snap(0.0f);
+            for (auto& rp : clickRipples) {
+                rp.active = false;
+                rp.progress = 1.0f;
+            }
         } else {
             const bool pressMoving = pressScale.Step(dt, 520.0f, 30.0f);
-            active |= pressMoving;
+            transientActive |= pressMoving;
             if (!pressMoving && pressScale.target >= 0.999f) {
                 pressedAction = 0;
+                pointerDown = false;
+            }
+
+            transientActive |= cursorX.Step(dt, 24.0f);
+            transientActive |= cursorY.Step(dt, 24.0f);
+            transientActive |= cursorInside.Step(dt, cursorInside.target > 0.5f ? 16.0f : 8.0f);
+
+            for (auto& rp : clickRipples) {
+                if (!rp.active) {
+                    continue;
+                }
+                rp.progress += dt * 2.35f;
+                if (rp.progress >= 1.0f) {
+                    rp.progress = 1.0f;
+                    rp.active = false;
+                } else {
+                    transientActive = true;
+                }
             }
         }
 
         for (size_t i = 0; i < kSlotCount; ++i) {
-            active |= toggleSlide[i].Step(dt, reduced ? 900.0f : 440.0f, reduced ? 60.0f : 30.0f);
-            active |= toggleGlow[i].Step(dt, 12.0f * speedMul);
-            active |= rowScale[i].Step(dt, 20.0f * speedMul);
+            transientActive |= toggleSlide[i].Step(dt, reduced ? 900.0f : 440.0f, reduced ? 60.0f : 30.0f);
+            transientActive |= toggleGlow[i].Step(dt, 12.0f * speedMul);
+            transientActive |= rowScale[i].Step(dt, 20.0f * speedMul);
+            transientActive |= firingPulse[i].Step(dt, 14.0f * speedMul);
         }
 
-        active |= newPickerOpen.Step(dt, spStiff, spDamp);
-        active |= viewTransition.Step(dt, 16.0f * speedMul);
-        active |= settingsTabX.Step(dt, spStiff, spDamp);
-        active |= settingsTabW.Step(dt, spStiff, spDamp);
+        transientActive |= newPickerOpen.Step(dt, spStiff, spDamp);
+        transientActive |= settingsOpen.Step(dt, spStiff, spDamp);
+        transientActive |= viewTransition.Step(dt, 16.0f * speedMul);
+        transientActive |= settingsTabX.Step(dt, spStiff, spDamp);
+        transientActive |= settingsTabW.Step(dt, spStiff, spDamp);
+        transientActive |= sidebarIndY.Step(dt, reduced ? 900.0f : 420.0f, reduced ? 60.0f : 31.0f);
+        transientActive |= sidebarIndH.Step(dt, reduced ? 900.0f : 420.0f, reduced ? 60.0f : 31.0f);
+        transientActive |= listScrollSmooth.Step(dt, 22.0f * speedMul);
+        transientActive |= seqScrollSmooth.Step(dt, 22.0f * speedMul);
+
         for (auto& e : sectionExpand) {
-            active |= e.Step(dt, 14.0f * speedMul);
+            transientActive |= e.Step(dt, 14.0f * speedMul);
         }
-        active |= toastSlide.Step(dt, 15.0f * speedMul);
+        transientActive |= toastSlide.Step(dt, 15.0f * speedMul);
 
         if (pendingDeleteId >= 0) {
-            active = true;
+            transientActive = true;
         }
 
-        animating_ = active;
-        if (!active) {
+        const bool ambientActive = full && windowFocused && windowActive;
+        if (ambientActive) {
+            ambientPhase += dt;
+        }
+
+        animating_ = transientActive;
+        const bool keepRunning = transientActive || ambientActive;
+        if (!keepRunning) {
             lastTickSec_ = 0.0;
         }
-        return active;
+        return keepRunning;
     }
 
-    [[nodiscard]] bool IsAnimating() const noexcept {
+    /// Returns true ONLY while transient springs/ripples are moving OR when
+    /// (windowFocused && windowActive && quality == Full) for ambient cosmic starlight/nebula drift.
+    [[nodiscard]] bool IsAnimating(bool windowFocused = true, bool windowActive = true) const noexcept {
+        if (quality >= static_cast<uint8_t>(mask::settings::AnimationQuality::Off)) {
+            return false;
+        }
+        if (quality == static_cast<uint8_t>(mask::settings::AnimationQuality::Full) &&
+            windowFocused && windowActive) {
+            return true;
+        }
+        return HasTransientMotion();
+    }
+
+    [[nodiscard]] bool HasTransientMotion() const noexcept {
         if (quality >= static_cast<uint8_t>(mask::settings::AnimationQuality::Off)) {
             return false;
         }
@@ -520,7 +803,11 @@ public:
             return true;
         }
         if (!appOpen.IsAtRest() || !pressScale.IsAtRest() || !newPickerOpen.IsAtRest() ||
-            !viewTransition.IsAtRest() || !settingsTabX.IsAtRest() || !settingsTabW.IsAtRest() ||
+            !settingsOpen.IsAtRest() || !viewTransition.IsAtRest() ||
+            !settingsTabX.IsAtRest() || !settingsTabW.IsAtRest() ||
+            !sidebarIndY.IsAtRest() || !sidebarIndH.IsAtRest() ||
+            !listScrollSmooth.IsAtRest() || !seqScrollSmooth.IsAtRest() ||
+            !cursorX.IsAtRest() || !cursorY.IsAtRest() || !cursorInside.IsAtRest() ||
             !toastSlide.IsAtRest()) {
             return true;
         }
@@ -529,8 +816,14 @@ public:
                 return true;
             }
         }
+        for (const auto& rp : clickRipples) {
+            if (rp.active) {
+                return true;
+            }
+        }
         for (size_t i = 0; i < kSlotCount; ++i) {
-            if (!toggleSlide[i].IsAtRest() || !toggleGlow[i].IsAtRest() || !rowScale[i].IsAtRest()) {
+            if (!toggleSlide[i].IsAtRest() || !toggleGlow[i].IsAtRest() ||
+                !rowScale[i].IsAtRest() || !firingPulse[i].IsAtRest()) {
                 return true;
             }
         }

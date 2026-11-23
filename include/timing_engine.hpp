@@ -63,11 +63,15 @@ public:
     TimingEngine& operator=(const TimingEngine&) = delete;
 
     /**
-     * @brief Reads the hardware Time Stamp Counter with pipeline serialization (__rdtscp).
+     * @brief Reads the hardware Time Stamp Counter with pipeline serialization (__rdtscp)
+     * and compiler read/write barriers so /O2 cannot hoist reads across kernel waits.
      */
     [[nodiscard]] static __forceinline uint64_t ReadTsc() noexcept {
         unsigned int aux = 0;
-        return __rdtscp(&aux);
+        _ReadWriteBarrier();
+        const uint64_t tsc = __rdtscp(&aux);
+        _ReadWriteBarrier();
+        return tsc;
     }
 
     /**
@@ -236,8 +240,7 @@ public:
      * @return The actual TSC timestamp immediately upon reaching targetTsc.
      */
     uint64_t WaitUntilTsc(uint64_t targetTsc) noexcept {
-        unsigned int aux = 0;
-        uint64_t nowTsc = __rdtscp(&aux);
+        uint64_t nowTsc = ReadTsc();
         if (nowTsc >= targetTsc) {
             return nowTsc;
         }
@@ -264,37 +267,13 @@ public:
         }
 
         // Phase B: Sub-millisecond deterministic spin-wait with _mm_pause()
-        nowTsc = __rdtscp(&aux);
+        nowTsc = ReadTsc();
         while (nowTsc < targetTsc) {
             _mm_pause();
-            nowTsc = __rdtscp(&aux);
+            nowTsc = ReadTsc();
         }
 
         return nowTsc;
-    }
-
-    /**
-     * @brief Sleeps using the persistent high-resolution timer for a bounded idle period (e.g. 500us)
-     * when no macro deadlines are immediately imminent.
-     */
-    void WaitShortIdleNs(uint64_t durationNs) noexcept {
-        if (waitableTimer_ != nullptr && durationNs >= 200'000ULL) {
-            const uint64_t sleep100Ns = std::min<uint64_t>(
-                durationNs / 100ULL,
-                static_cast<uint64_t>((std::numeric_limits<LONGLONG>::max)())
-            );
-            LARGE_INTEGER liDueTime{};
-            liDueTime.QuadPart = -static_cast<LONGLONG>(sleep100Ns);
-            if (SetWaitableTimer(waitableTimer_, &liDueTime, 0, nullptr, nullptr, FALSE)) {
-                WaitForSingleObject(waitableTimer_, 5);
-                return;
-            }
-        }
-        const uint64_t target = ReadTsc() + NanosecondsToTsc(durationNs);
-        unsigned int aux = 0;
-        while (__rdtscp(&aux) < target) {
-            _mm_pause();
-        }
     }
 
     /**
@@ -347,11 +326,10 @@ public:
             return false;
         }
 
-        unsigned int aux = 0;
-        nowTsc = __rdtscp(&aux);
+        nowTsc = ReadTsc();
         while (nowTsc < targetTsc) {
             _mm_pause();
-            nowTsc = __rdtscp(&aux);
+            nowTsc = ReadTsc();
         }
         return true;
     }

@@ -154,8 +154,23 @@ enum class ComplexStepKind : uint8_t {
     LaunchProgram = 10,
     RunCommand    = 11,
     SetLayer      = 12,
-    ToggleMacro   = 13
+    ToggleMacro   = 13,
+    IfCheck       = 14,
+    ElseBranch    = 15,
+    EndIf         = 16
 };
+
+enum class ComplexConditionKind : uint8_t {
+    KeyHeld       = 0,
+    ColorMatches  = 1,
+    LayerIs       = 2,
+    UnlockStateIs = 3,
+    MacroActive   = 4,
+    RandomChance  = 5
+};
+
+inline constexpr uint8_t kComplexCondMask   = 0x0FU;
+inline constexpr uint8_t kComplexFlagNegate = 0x10U;
 
 struct ComplexStep {
     uint8_t  kind{0};
@@ -164,7 +179,7 @@ struct ComplexStep {
     int32_t  x{0};
     int32_t  y{0};
     uint32_t durationMs{20};
-    uint32_t param{0};       // loop count / monitor index / layer / macro slot / scroll delta / timeout ms
+    uint32_t param{0};       // loop count / monitor index / layer / macro slot / scroll delta / timeout ms / chance%
     uint8_t  r{0};
     uint8_t  g{0};
     uint8_t  b{0};
@@ -173,6 +188,30 @@ struct ComplexStep {
 };
 
 static_assert(std::is_trivially_copyable_v<ComplexStep>, "ComplexStep must be trivially copyable.");
+
+[[nodiscard]] constexpr ComplexConditionKind GetStepConditionKind(const ComplexStep& s) noexcept {
+    const uint8_t raw = static_cast<uint8_t>(s.flags & kComplexCondMask);
+    return (raw <= static_cast<uint8_t>(ComplexConditionKind::RandomChance))
+        ? static_cast<ComplexConditionKind>(raw)
+        : ComplexConditionKind::KeyHeld;
+}
+
+constexpr void SetStepConditionKind(ComplexStep& s, ComplexConditionKind cond) noexcept {
+    s.flags = static_cast<uint8_t>((s.flags & ~kComplexCondMask) |
+                                   (static_cast<uint8_t>(cond) & kComplexCondMask));
+}
+
+[[nodiscard]] constexpr bool IsStepConditionNegated(const ComplexStep& s) noexcept {
+    return (s.flags & kComplexFlagNegate) != 0U;
+}
+
+constexpr void SetStepConditionNegated(ComplexStep& s, bool neg) noexcept {
+    if (neg) {
+        s.flags = static_cast<uint8_t>(s.flags | kComplexFlagNegate);
+    } else {
+        s.flags = static_cast<uint8_t>(s.flags & ~kComplexFlagNegate);
+    }
+}
 
 struct ComplexSequenceConfig {
     uint8_t  slotIndex{0};
@@ -205,6 +244,11 @@ enum class ColorTriggerActionKind : uint8_t {
     RunComplexSeq = 3
 };
 
+enum class ColorTriggerMatchRule : uint8_t {
+    AnyPixel    = 0,
+    ZoneAverage = 1
+};
+
 struct ColorTriggerConfig {
     uint8_t  slotIndex{0};
     bool     enabled{false};
@@ -226,11 +270,23 @@ struct ColorTriggerConfig {
     uint32_t holdMs{15};
     uint32_t cooldownMs{80};
     uint8_t  linkedIndex{0};
-    uint8_t  reserved[3]{0, 0, 0};
+    uint8_t  reserved[3]{0, 0, 0};    // [0]=ColorTriggerMatchRule (0=AnyPixel, 1=ZoneAverage)
     wchar_t  name[32]{L"Color trigger"};
 };
 
 static_assert(std::is_trivially_copyable_v<ColorTriggerConfig>, "ColorTriggerConfig must be trivially copyable.");
+
+[[nodiscard]] constexpr ColorTriggerMatchRule GetTriggerMatchRule(const ColorTriggerConfig& c) noexcept {
+    return (c.reserved[0] == static_cast<uint8_t>(ColorTriggerMatchRule::ZoneAverage))
+        ? ColorTriggerMatchRule::ZoneAverage
+        : ColorTriggerMatchRule::AnyPixel;
+}
+
+constexpr void SetTriggerMatchRule(ColorTriggerConfig& c, ColorTriggerMatchRule rule) noexcept {
+    c.reserved[0] = (rule == ColorTriggerMatchRule::ZoneAverage)
+        ? static_cast<uint8_t>(ColorTriggerMatchRule::ZoneAverage)
+        : static_cast<uint8_t>(ColorTriggerMatchRule::AnyPixel);
+}
 
 // =====================================================================================
 //  Multi-Device / Multi-Monitor Remapping
@@ -504,11 +560,18 @@ struct alignas(kCacheLineSize) EngineSharedState {
     alignas(kCacheLineSize) std::array<std::atomic<uint64_t>, 4> suppressedVkBits{};
     std::atomic<bool>     anySuppressionActive{false};
 
+    // Per-VK virtual echo tracking for HIDMaestro output pass-through in hooks
+    alignas(kCacheLineSize) std::array<std::atomic<uint32_t>, 256> virtualEchoDownCount{};
+    alignas(kCacheLineSize) std::array<std::atomic<uint32_t>, 256> virtualEchoUpCount{};
+    alignas(kCacheLineSize) std::array<std::atomic<uint64_t>, 256> virtualEchoDownTsc{};
+    alignas(kCacheLineSize) std::array<std::atomic<uint64_t>, 256> virtualEchoUpTsc{};
+
     // Cache Line 1+: Physical Key/Button State (Updated by GameInput hardware stream, read by Engine)
     alignas(kCacheLineSize) std::array<std::atomic<uint8_t>, 256> physicalKeyState{};
 
     // Cache Line 5+: Synthetic Held State (Updated by HIDMaestro Dispatcher BEFORE hardware write, read by Watchdog on emergency)
     alignas(kCacheLineSize) std::array<std::atomic<uint8_t>, 256> syntheticHeldState{};
+    alignas(kCacheLineSize) std::array<std::atomic<uint64_t>, 4> syntheticKeyBits{};
 
     // Lock-Free Queues (MPSC for multi-producer input/aux feeds; SPSC for UI->Engine macro config sync)
     MPSCQueue<InputTriggerEvent, 4096> inputEventQueue{};
@@ -519,6 +582,13 @@ struct alignas(kCacheLineSize) EngineSharedState {
         for (size_t i = 0; i < 256; ++i) {
             physicalKeyState[i].store(0, std::memory_order_relaxed);
             syntheticHeldState[i].store(0, std::memory_order_relaxed);
+            virtualEchoDownCount[i].store(0, std::memory_order_relaxed);
+            virtualEchoUpCount[i].store(0, std::memory_order_relaxed);
+            virtualEchoDownTsc[i].store(0, std::memory_order_relaxed);
+            virtualEchoUpTsc[i].store(0, std::memory_order_relaxed);
+        }
+        for (auto& w : syntheticKeyBits) {
+            w.store(0, std::memory_order_relaxed);
         }
         for (auto& w : watchedVkBits) {
             w.store(0, std::memory_order_relaxed);
