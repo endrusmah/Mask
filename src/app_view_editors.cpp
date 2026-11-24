@@ -1,11 +1,10 @@
-#pragma once
+#include "app_view.hpp"
 
-// Secondary Cosmic Glass Editor Views:
-//  1. 128-Step Complex Sequence Studio (preserving all 17 step kinds & nested loop/conditional rails)
-//  2. Reworked Multi-Device / Multi-Monitor Remap Editor with Hero [Source ---> Target] Banner
-//  3. Simplified & Rock-Solid Trigger Bot View (Color Match / Color Change + 15x15 Live Loupe)
-//  4. 5-Tab Cosmic Settings Overlay (General, Appearance, Performance, Hotkeys, Hardware & Profiles)
-//  5. Animated `+ New` Creation Picker Modal
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cwchar>
+#include <iterator>
 
 namespace mask::app {
 
@@ -13,13 +12,13 @@ namespace mask::app {
 //  1. Complex Sequence Editor (up to 128 workflow steps)
 // =====================================================================================
 
-inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noexcept {
+void UiRenderer::DrawSequenceEditor(const D2D1_RECT_F& panel) noexcept {
     const auto& u = Ui();
     const auto& a = Anim();
     const int idx = std::clamp(u.selectedIndex, 0, kComplexSeqCount - 1);
-    const auto& seq = u.sequences[idx];
+    const auto& seq = u.sequences[static_cast<size_t>(idx)];
     const bool running = (frame_.activeSeqMask & (1U << idx)) != 0U;
-    const uint16_t execStep = frame_.activeSeqStep[idx];
+    const uint16_t execStep = frame_.activeSeqStep[static_cast<size_t>(idx)];
     const uint8_t bindTarget = frame_.bindTarget;
     const int animIdx = static_cast<int>(AnimSlotFor(ItemKind::Sequence, idx));
 
@@ -29,21 +28,22 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
 
     // ---- Header: inline rename | On/Off | Duplicate | Delete ----------------------
     const D2D1_RECT_F delBtn = Rc(R - 80.0f, y + 3.0f, R, y + 33.0f);
-    Button(delBtn, u.pendingDeleteConfirm ? L"Confirm?" : L"Delete", act::DeleteItem,
+    Button(delBtn, u.pendingDeleteConfirm ? L"Confirm?" : L"Delete", UiAction{ ActionKind::DeleteItem },
            u.pendingDeleteConfirm ? BtnStyle::Danger : BtnStyle::Ghost);
 
     const D2D1_RECT_F dupBtn = Rc(delBtn.left - 8.0f - 84.0f, y + 3.0f, delBtn.left - 8.0f, y + 33.0f);
-    Button(dupBtn, L"Duplicate", act::DuplicateItem, BtnStyle::Ghost);
+    Button(dupBtn, L"Duplicate", UiAction{ ActionKind::DuplicateItem }, BtnStyle::Ghost);
 
     const float switchX = dupBtn.left - 16.0f - 36.0f;
-    Switch(switchX, y + 8.0f, seq.enabled, act::ToggleEnabled, running, animIdx);
+    const UiAction toggleAct{ ActionKind::ToggleEnabled };
+    Switch(switchX, y + 8.0f, seq.enabled, toggleAct, running, animIdx);
     Text(running ? L"Running" : (seq.enabled ? L"On" : L"Off"), gpu_.fBody,
          Rc(switchX - 72.0f, y, switchX - 10.0f, y + 36.0f),
          running ? ColSignalHi() : theme::Muted, DWRITE_TEXT_ALIGNMENT_TRAILING);
-    Hit(Rc(switchX - 72.0f, y, switchX, y + 36.0f), act::ToggleEnabled);
+    Hit(Rc(switchX - 72.0f, y, switchX, y + 36.0f), toggleAct);
 
     const D2D1_RECT_F nameRect = Rc(L - 8.0f, y, switchX - 80.0f, y + 36.0f);
-    const int nameA = act::FieldFocus + static_cast<int>(Field::SeqName);
+    const UiAction nameA{ ActionKind::FieldFocus, static_cast<int16_t>(Field::SeqName) };
     if (u.editField == Field::SeqName) {
         Fill(nameRect, 6.0f, theme::Inset, 0.92f);
         Stroke(nameRect, 6.0f, ColSignal(), 1.5f);
@@ -59,12 +59,26 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
     wchar_t seqDesc[180]{};
     DescribeComplexSequence(seq, seqDesc, std::size(seqDesc));
     Text(seqDesc, gpu_.fBody, Rc(L, y + 36.0f, R, y + 56.0f), seq.triggerVk == 0U ? theme::Warn : theme::Muted);
-    y += 62.0f;
+    y += 60.0f;
+
+    // ---- Untrusted Import Warning Badge -------------------------------------------
+    if (mask::core::IsSequenceUntrustedImport(seq)) {
+        const D2D1_RECT_F badgeR = Rc(L, y, R, y + 28.0f);
+        gpu_.FillLinearRect(badgeR, 7.0f, theme::Warn, 0.20f, theme::Warn, 0.09f, true);
+        Stroke(badgeR, 7.0f, theme::Warn, 1.1f, 0.85f);
+        const float dotY = (badgeR.top + badgeR.bottom) * 0.5f;
+        gpu_.FillRadialGlow(badgeR.left + 14.0f, dotY, 8.0f, 8.0f, theme::Warn, 0.35f, theme::Warn, 0.0f);
+        Dot(badgeR.left + 14.0f, dotY, 3.5f, theme::Warn);
+        Text(L"Imported \u2014 asks permission before running apps or commands", gpu_.fSmall,
+             Rc(badgeR.left + 26.0f, badgeR.top, badgeR.right - 10.0f, badgeR.bottom), 0xFDE68AU);
+        y += 35.0f;
+    }
 
     // ---- Trigger & Run Mode Row ---------------------------------------------------
     constexpr float kTrigRowH = 34.0f;
     Text(L"Trigger", gpu_.fLabel, RcW(L, y, 56.0f, kTrigRowH), theme::Muted);
-    KeyChip(RcW(L + 58.0f, y, 134.0f, kTrigRowH), seq.triggerVk, act::SeqBindTrigger, bindTarget == 20U);
+    KeyChip(RcW(L + 58.0f, y, 134.0f, kTrigRowH), seq.triggerVk,
+            UiAction{ ActionKind::SeqBindTrigger }, bindTarget == 20U);
 
     const float segX = L + 202.0f;
     const float segW = std::min(204.0f, R - segX - 118.0f);
@@ -75,7 +89,7 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
     for (int m = 0; m < 3; ++m) {
         const D2D1_RECT_F cell = RcW(seg.left + 3.0f + segCellW * static_cast<float>(m), seg.top + 3.0f, segCellW, kTrigRowH - 6.0f);
         const bool sel = (seq.triggerMode == static_cast<uint8_t>(m));
-        const int actId = act::SeqTriggerMode + m;
+        const UiAction actId{ ActionKind::SeqTriggerMode, static_cast<int16_t>(m) };
         if (sel) {
             gpu_.FillLinearRect(cell, 6.0f, theme::RaisedHi, 0.95f, theme::Raised, 0.90f, false);
             GlowLine(cell.left + 12.0f, cell.bottom - 1.5f, cell.right - 12.0f, cell.bottom - 1.5f,
@@ -98,7 +112,7 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
     wchar_t humBtnLbl[32]{};
     std::swprintf(humBtnLbl, std::size(humBtnLbl), L"Timing: %ls", humVal);
     const float humW = std::ceil(MeasureWidth(humBtnLbl, gpu_.fSmall)) + 18.0f;
-    Button(Rc(R - humW, y + 4.0f, R, y + 30.0f), humBtnLbl, act::SeqCycleHumanize,
+    Button(Rc(R - humW, y + 4.0f, R, y + 30.0f), humBtnLbl, UiAction{ ActionKind::SeqCycleHumanize },
            seq.humanizePct > 0U ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
     y += kTrigRowH + 12.0f;
 
@@ -115,7 +129,6 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
     const int stepCount = std::clamp<int>(seq.stepCount, 0, kComplexStepMax);
     const bool hasSelStep = (stepCount > 0 && u.selectedSeqStep >= 0 && u.selectedSeqStep < stepCount);
 
-    // Left Card Header
     Text(L"Steps", gpu_.fBodyStrong, RcW(leftCard.left + 14.0f, leftCard.top + 8.0f, 48.0f, 24.0f), theme::Text);
     wchar_t cntBuf[24]{};
     std::swprintf(cntBuf, std::size(cntBuf), L"%u / %u",
@@ -123,9 +136,9 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
     Text(cntBuf, gpu_.fSmall, RcW(leftCard.left + 62.0f, leftCard.top + 8.0f, 70.0f, 24.0f), theme::Faint);
 
     Button(Rc(leftCard.right - 72.0f, leftCard.top + 8.0f, leftCard.right - 10.0f, leftCard.top + 32.0f),
-           L"+ Add", act::SeqStepAdd, BtnStyle::Primary, gpu_.fSmall);
+           L"+ Add", UiAction{ ActionKind::SeqStepAdd }, BtnStyle::Primary, gpu_.fSmall);
     Button(Rc(leftCard.right - 130.0f, leftCard.top + 8.0f, leftCard.right - 78.0f, leftCard.top + 32.0f),
-           L"Insert", act::SeqStepInsert, BtnStyle::Ghost, gpu_.fSmall);
+           L"Insert", UiAction{ ActionKind::SeqStepInsert }, BtnStyle::Ghost, gpu_.fSmall);
 
     Line(leftCard.left + 1.0f, Snap(leftCard.top + 40.0f), leftCard.right - 1.0f, Snap(leftCard.top + 40.0f), theme::Line, 1.0f, 0.72f);
 
@@ -157,12 +170,12 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
         const int maxVisDepth = std::max(0, std::min(5, static_cast<int>((availW - 170.0f) / kIndentStep)));
 
         for (int i = 0; i < stepCount; ++i) {
-            const auto& step = seq.steps[i];
-            const auto kind = static_cast<ComplexStepKind>(step.kind);
+            const auto& step = seq.steps[static_cast<size_t>(i)];
+            const auto stepKind = static_cast<ComplexStepKind>(step.kind);
 
             bool closedScope = false;
             UINT32 closedCol = theme::Violet;
-            if (kind == ComplexStepKind::LoopEnd) {
+            if (stepKind == ComplexStepKind::LoopEnd) {
                 if (scopeDepth > 0 && scopeStack[scopeDepth - 1] == ScopeKind::Loop) {
                     --scopeDepth;
                     closedScope = true;
@@ -176,7 +189,7 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
                     }
                 }
                 closedCol = theme::Violet;
-            } else if (kind == ComplexStepKind::EndIf) {
+            } else if (stepKind == ComplexStepKind::EndIf) {
                 if (scopeDepth > 0 && scopeStack[scopeDepth - 1] == ScopeKind::Cond) {
                     --scopeDepth;
                     closedScope = true;
@@ -193,7 +206,7 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
             }
 
             int displayDepth = scopeDepth;
-            const bool isElseAligned = (kind == ComplexStepKind::ElseBranch &&
+            const bool isElseAligned = (stepKind == ComplexStepKind::ElseBranch &&
                                         scopeDepth > 0 &&
                                         scopeStack[scopeDepth - 1] == ScopeKind::Cond);
             if (isElseAligned) {
@@ -217,8 +230,8 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
                     const float midY = Snap((rr.top + rr.bottom) * 0.5f);
                     Line(gx, midY, cardR.left - 1.0f, midY, innerCol, 1.5f, 0.58f);
                 }
-                if ((kind == ComplexStepKind::LoopStart || kind == ComplexStepKind::IfCheck) && displayDepth < maxVisDepth) {
-                    const UINT32 startCol = (kind == ComplexStepKind::IfCheck) ? theme::Cyan : theme::Violet;
+                if ((stepKind == ComplexStepKind::LoopStart || stepKind == ComplexStepKind::IfCheck) && displayDepth < maxVisDepth) {
+                    const UINT32 startCol = (stepKind == ComplexStepKind::IfCheck) ? theme::Cyan : theme::Violet;
                     const float gx = Snap(rr.left + 8.0f + static_cast<float>(displayDepth) * kIndentStep);
                     Line(gx, rr.bottom, gx, rr.bottom + 4.0f, startCol, 1.5f, 0.62f);
                 }
@@ -234,7 +247,7 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
 
                 const bool sel = (i == u.selectedSeqStep);
                 const bool isLive = running && (execStep == static_cast<uint16_t>(i));
-                const int actId = act::SelectSeqStep + i;
+                const UiAction actId{ ActionKind::SelectSeqStep, static_cast<int16_t>(i) };
 
                 if (isLive) {
                     gpu_.FillLinearRect(cardR, 6.0f, ColSignal(), 0.28f, ColSecondary(), 0.14f, true);
@@ -246,22 +259,22 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
                     Fill(cardR, 6.0f, theme::Raised, 0.80f);
                 } else {
                     Fill(cardR, 6.0f, theme::Panel, 0.72f);
-                    if (kind == ComplexStepKind::LoopStart || kind == ComplexStepKind::LoopEnd) {
+                    if (stepKind == ComplexStepKind::LoopStart || stepKind == ComplexStepKind::LoopEnd) {
                         Fill(cardR, 6.0f, theme::Violet, 0.09f);
-                    } else if (kind == ComplexStepKind::IfCheck ||
-                               kind == ComplexStepKind::ElseBranch ||
-                               kind == ComplexStepKind::EndIf) {
+                    } else if (stepKind == ComplexStepKind::IfCheck ||
+                               stepKind == ComplexStepKind::ElseBranch ||
+                               stepKind == ComplexStepKind::EndIf) {
                         Fill(cardR, 6.0f, theme::Cyan, 0.09f);
                     }
                 }
                 Hit(cardR, actId);
 
                 UINT32 catCol = ColSecondary();
-                if (kind == ComplexStepKind::WaitMs || kind == ComplexStepKind::WaitForColor) catCol = theme::Warn;
-                else if (kind == ComplexStepKind::LoopStart || kind == ComplexStepKind::LoopEnd) catCol = theme::Violet;
-                else if (kind == ComplexStepKind::IfCheck || kind == ComplexStepKind::ElseBranch || kind == ComplexStepKind::EndIf) catCol = theme::Cyan;
-                else if (kind == ComplexStepKind::LaunchProgram || kind == ComplexStepKind::RunCommand ||
-                         kind == ComplexStepKind::SetLayer || kind == ComplexStepKind::ToggleMacro) catCol = theme::Ok;
+                if (stepKind == ComplexStepKind::WaitMs || stepKind == ComplexStepKind::WaitForColor) catCol = theme::Warn;
+                else if (stepKind == ComplexStepKind::LoopStart || stepKind == ComplexStepKind::LoopEnd) catCol = theme::Violet;
+                else if (stepKind == ComplexStepKind::IfCheck || stepKind == ComplexStepKind::ElseBranch || stepKind == ComplexStepKind::EndIf) catCol = theme::Cyan;
+                else if (stepKind == ComplexStepKind::LaunchProgram || stepKind == ComplexStepKind::RunCommand ||
+                         stepKind == ComplexStepKind::SetLayer || stepKind == ComplexStepKind::ToggleMacro) catCol = theme::Ok;
 
                 if (isLive || sel) {
                     GlowLine(cardR.left + 8.0f, cardR.top + 8.0f, cardR.left + 8.0f, cardR.bottom - 8.0f,
@@ -276,8 +289,8 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
                      isLive ? ColSignalHi() : theme::Faint, DWRITE_TEXT_ALIGNMENT_CENTER);
 
                 float descRight = cardR.right - 10.0f;
-                const bool hasColorSwatch = (kind == ComplexStepKind::WaitForColor) ||
-                    (kind == ComplexStepKind::IfCheck &&
+                const bool hasColorSwatch = (stepKind == ComplexStepKind::WaitForColor) ||
+                    (stepKind == ComplexStepKind::IfCheck &&
                      mask::core::GetStepConditionKind(step) == ComplexConditionKind::ColorMatches);
                 if (hasColorSwatch) {
                     const UINT32 rgb = (static_cast<UINT32>(step.r) << 16) |
@@ -295,9 +308,9 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
                      (sel || isLive) ? theme::White : theme::Text);
             }
 
-            if (kind == ComplexStepKind::LoopStart && scopeDepth < 16) {
+            if (stepKind == ComplexStepKind::LoopStart && scopeDepth < 16) {
                 scopeStack[scopeDepth++] = ScopeKind::Loop;
-            } else if (kind == ComplexStepKind::IfCheck && scopeDepth < 16) {
+            } else if (stepKind == ComplexStepKind::IfCheck && scopeDepth < 16) {
                 scopeStack[scopeDepth++] = ScopeKind::Cond;
             }
             sy += rowPitch;
@@ -322,7 +335,7 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
         return;
     }
 
-    const ComplexStep& st = seq.steps[u.selectedSeqStep];
+    const ComplexStep& st = seq.steps[static_cast<size_t>(u.selectedSeqStep)];
     const auto kind = static_cast<ComplexStepKind>(st.kind);
     const float iL = rightCard.left + 14.0f;
     const float iR = rightCard.right - 14.0f;
@@ -335,17 +348,18 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
     iy += 20.0f;
 
     {
+        const UiAction menuAct{ ActionKind::SeqToggleStepKindMenu };
         seqStepKindBtnRect_ = RcW(iL, iy, iW, 32.0f);
-        const D2D1_RECT_F sr = a.ApplySqueeze(seqStepKindBtnRect_, act::SeqToggleStepKindMenu);
+        const D2D1_RECT_F sr = a.ApplySqueeze(seqStepKindBtnRect_, EncodeUiActionKey(menuAct));
         const bool open = u.showStepKindMenu;
-        const bool hov = Hovered(act::SeqToggleStepKindMenu);
+        const bool hov = Hovered(menuAct);
         Fill(sr, 7.0f, (open || hov) ? theme::RaisedHi : theme::Raised, 0.92f);
         Stroke(sr, 7.0f, open ? ColSignal() : (hov ? theme::LineHi : theme::Line), open ? 1.4f : 1.0f);
         Text(StepKindName(kind), gpu_.fBodyStrong, Rc(sr.left + 12.0f, sr.top, sr.right - 28.0f, sr.bottom),
              open ? ColSignalHi() : theme::Text);
         Text(L"\u25BE", gpu_.fBodyStrong, Rc(sr.right - 26.0f, sr.top, sr.right - 8.0f, sr.bottom),
              open ? ColSignalHi() : theme::Muted, DWRITE_TEXT_ALIGNMENT_CENTER);
-        Hit(seqStepKindBtnRect_, act::SeqToggleStepKindMenu);
+        Hit(seqStepKindBtnRect_, menuAct);
     }
 
     iy += 42.0f;
@@ -356,7 +370,7 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
     switch (kind) {
         case ComplexStepKind::KeyClick: {
             Text(L"Key", gpu_.fSmall, RcW(iL, iy, iW, 18.0f), theme::Muted);
-            KeyChip(RcW(iL, iy + 22.0f, iW, 34.0f), st.vk, act::SeqStepBindKey, bindTarget == 21U);
+            KeyChip(RcW(iL, iy + 22.0f, iW, 34.0f), st.vk, UiAction{ ActionKind::SeqStepBindKey }, bindTarget == 21U);
             Text(L"Hold for", gpu_.fSmall, RcW(iL, iy + 68.0f, iW, 18.0f), theme::Muted);
             std::swprintf(vbuf, std::size(vbuf), L"%u ms", static_cast<unsigned>(st.durationMs));
             GenericField(RcW(iL, iy + 90.0f, iW, 34.0f), Field::SeqStepDuration, vbuf, true);
@@ -365,7 +379,7 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
         case ComplexStepKind::KeyDown:
         case ComplexStepKind::KeyUp: {
             Text(L"Key", gpu_.fSmall, RcW(iL, iy, iW, 18.0f), theme::Muted);
-            KeyChip(RcW(iL, iy + 22.0f, iW, 34.0f), st.vk, act::SeqStepBindKey, bindTarget == 21U);
+            KeyChip(RcW(iL, iy + 22.0f, iW, 34.0f), st.vk, UiAction{ ActionKind::SeqStepBindKey }, bindTarget == 21U);
             Text(kind == ComplexStepKind::KeyDown
                      ? L"Keeps this key pressed until a Release key step or Stop."
                      : L"Releases a key previously held down.",
@@ -394,8 +408,10 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
             std::swprintf(vbuf, std::size(vbuf), L"%+d", static_cast<int>(delta));
             GenericField(RcW(iL, iy + 22.0f, iW, 34.0f), Field::SeqStepParam, vbuf, true);
             const float hw = (iW - 8.0f) * 0.5f;
-            Button(RcW(iL, iy + 66.0f, hw, 28.0f), L"Scroll down", act::SeqStepQuickScroll + 0, BtnStyle::Chip, gpu_.fSmall);
-            Button(RcW(iL + hw + 8.0f, iy + 66.0f, hw, 28.0f), L"Scroll up", act::SeqStepQuickScroll + 1, BtnStyle::Chip, gpu_.fSmall);
+            Button(RcW(iL, iy + 66.0f, hw, 28.0f), L"Scroll down",
+                   UiAction{ ActionKind::SeqStepQuickScroll, 0 }, BtnStyle::Chip, gpu_.fSmall);
+            Button(RcW(iL + hw + 8.0f, iy + 66.0f, hw, 28.0f), L"Scroll up",
+                   UiAction{ ActionKind::SeqStepQuickScroll, 1 }, BtnStyle::Chip, gpu_.fSmall);
             break;
         }
         case ComplexStepKind::WaitMs: {
@@ -408,7 +424,8 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
             for (int w = 0; w < 4; ++w) {
                 const float px = iL + static_cast<float>(w % 2) * (hw + 8.0f);
                 const float py = iy + 88.0f + static_cast<float>(w / 2) * 34.0f;
-                Button(RcW(px, py, hw, 28.0f), kWaitLabels[w], act::SeqStepQuickWait + w, BtnStyle::Chip, gpu_.fSmall);
+                Button(RcW(px, py, hw, 28.0f), kWaitLabels[w],
+                       UiAction{ ActionKind::SeqStepQuickWait, static_cast<int16_t>(w) }, BtnStyle::Chip, gpu_.fSmall);
             }
             break;
         }
@@ -418,7 +435,8 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
             Stroke(RcW(iL, iy, 32.0f, 32.0f), 6.0f, theme::LineHi);
             Button(Rc(iL + 40.0f, iy, iR, iy + 32.0f),
                    u.seqColorPickActive ? L"Click screen\u2026" : L"Pick color & spot",
-                   act::SeqStepPickColor, u.seqColorPickActive ? BtnStyle::Primary : BtnStyle::Secondary, gpu_.fSmall);
+                   UiAction{ ActionKind::SeqStepPickColor },
+                   u.seqColorPickActive ? BtnStyle::Primary : BtnStyle::Secondary, gpu_.fSmall);
 
             const float hw = (iW - 10.0f) * 0.5f;
             const float r2 = iy + 44.0f;
@@ -466,7 +484,7 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
                 const bool active = (cond == static_cast<ComplexConditionKind>(c));
                 Button(RcW(cx, cy, cw, 26.0f),
                        ConditionKindName(static_cast<ComplexConditionKind>(c)),
-                       act::SeqStepCondKind + c,
+                       UiAction{ ActionKind::SeqStepCondKind, static_cast<int16_t>(c) },
                        active ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
             }
 
@@ -474,11 +492,14 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
             switch (cond) {
                 case ComplexConditionKind::KeyHeld: {
                     Text(L"Key to check", gpu_.fSmall, RcW(iL, cyBody, iW, 18.0f), theme::Muted);
-                    KeyChip(RcW(iL, cyBody + 20.0f, iW, 34.0f), st.vk, act::SeqStepBindKey, bindTarget == 21U);
+                    KeyChip(RcW(iL, cyBody + 20.0f, iW, 34.0f), st.vk,
+                            UiAction{ ActionKind::SeqStepBindKey }, bindTarget == 21U);
                     const float hw = (iW - 8.0f) * 0.5f;
-                    Button(RcW(iL, cyBody + 62.0f, hw, 28.0f), L"Is held", act::SeqStepCondNegate + 0,
+                    Button(RcW(iL, cyBody + 62.0f, hw, 28.0f), L"Is held",
+                           UiAction{ ActionKind::SeqStepCondNegate, 0 },
                            !neg ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
-                    Button(RcW(iL + hw + 8.0f, cyBody + 62.0f, hw, 28.0f), L"Is NOT held", act::SeqStepCondNegate + 1,
+                    Button(RcW(iL + hw + 8.0f, cyBody + 62.0f, hw, 28.0f), L"Is NOT held",
+                           UiAction{ ActionKind::SeqStepCondNegate, 1 },
                            neg ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
                     cyBody += 100.0f;
                     break;
@@ -491,7 +512,7 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
                     Stroke(RcW(iL, cyBody, 32.0f, 32.0f), 6.0f, theme::LineHi);
                     Button(Rc(iL + 40.0f, cyBody, iR, cyBody + 32.0f),
                            u.seqColorPickActive ? L"Click screen\u2026" : L"Pick color & spot",
-                           act::SeqStepPickColor,
+                           UiAction{ ActionKind::SeqStepPickColor },
                            u.seqColorPickActive ? BtnStyle::Primary : BtnStyle::Secondary, gpu_.fSmall);
 
                     const float hw = (iW - 10.0f) * 0.5f;
@@ -511,9 +532,11 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
 
                     Text(L"Mode", gpu_.fSmall, RcW(iL + hw + 10.0f, r3, hw, 16.0f), theme::Muted);
                     const float bw = (hw - 6.0f) * 0.5f;
-                    Button(RcW(iL + hw + 10.0f, r3 + 18.0f, bw, 30.0f), L"Matches", act::SeqStepCondNegate + 0,
+                    Button(RcW(iL + hw + 10.0f, r3 + 18.0f, bw, 30.0f), L"Matches",
+                           UiAction{ ActionKind::SeqStepCondNegate, 0 },
                            !neg ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
-                    Button(RcW(iL + hw + 10.0f + bw + 6.0f, r3 + 18.0f, bw, 30.0f), L"Not", act::SeqStepCondNegate + 1,
+                    Button(RcW(iL + hw + 10.0f + bw + 6.0f, r3 + 18.0f, bw, 30.0f), L"Not",
+                           UiAction{ ActionKind::SeqStepCondNegate, 1 },
                            neg ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
                     cyBody = r3 + 56.0f;
                     break;
@@ -523,13 +546,16 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
                     const float lw = (iW - 15.0f) / 4.0f;
                     for (int l = 0; l < kRemapLayerCount; ++l) {
                         Button(RcW(iL + static_cast<float>(l) * (lw + 5.0f), cyBody + 20.0f, lw, 28.0f),
-                               LayerName(static_cast<uint8_t>(l)), act::SeqStepLayer + l,
+                               LayerName(static_cast<uint8_t>(l)),
+                               UiAction{ ActionKind::SeqStepLayer, static_cast<int16_t>(l) },
                                (st.param & 3U) == static_cast<uint32_t>(l) ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
                     }
                     const float hw = (iW - 8.0f) * 0.5f;
-                    Button(RcW(iL, cyBody + 56.0f, hw, 28.0f), L"Is active", act::SeqStepCondNegate + 0,
+                    Button(RcW(iL, cyBody + 56.0f, hw, 28.0f), L"Is active",
+                           UiAction{ ActionKind::SeqStepCondNegate, 0 },
                            !neg ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
-                    Button(RcW(iL + hw + 8.0f, cyBody + 56.0f, hw, 28.0f), L"Is NOT active", act::SeqStepCondNegate + 1,
+                    Button(RcW(iL + hw + 8.0f, cyBody + 56.0f, hw, 28.0f), L"Is NOT active",
+                           UiAction{ ActionKind::SeqStepCondNegate, 1 },
                            neg ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
                     cyBody += 94.0f;
                     break;
@@ -537,25 +563,29 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
                 case ComplexConditionKind::UnlockStateIs: {
                     Text(L"Control lock state", gpu_.fSmall, RcW(iL, cyBody, iW, 18.0f), theme::Muted);
                     const float hw = (iW - 8.0f) * 0.5f;
-                    Button(RcW(iL, cyBody + 20.0f, hw, 30.0f), L"Unlocked", act::SeqStepCondUnlock + 0,
+                    Button(RcW(iL, cyBody + 20.0f, hw, 30.0f), L"Unlocked",
+                           UiAction{ ActionKind::SeqStepCondUnlock, 0 },
                            (st.param == 0U) ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
-                    Button(RcW(iL + hw + 8.0f, cyBody + 20.0f, hw, 30.0f), L"Locked", act::SeqStepCondUnlock + 1,
+                    Button(RcW(iL + hw + 8.0f, cyBody + 20.0f, hw, 30.0f), L"Locked",
+                           UiAction{ ActionKind::SeqStepCondUnlock, 1 },
                            (st.param != 0U) ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
                     cyBody += 60.0f;
                     break;
                 }
                 case ComplexConditionKind::MacroActive: {
                     const uint32_t slotIdx = st.param % static_cast<uint32_t>(kSlotCount);
-                    Text(L"Macro slot", gpu_.fSmall, RcW(iL, cyBody, iW, 18.0f), theme::Muted);
+                    Text(L"Autoclicker slot", gpu_.fSmall, RcW(iL, cyBody, iW, 18.0f), theme::Muted);
                     std::swprintf(vbuf, std::size(vbuf), L"#%u", static_cast<unsigned>(slotIdx + 1U));
                     GenericField(RcW(iL, cyBody + 20.0f, iW, 32.0f), Field::SeqStepParam, vbuf, true);
                     wchar_t mLabel[64]{};
                     std::swprintf(mLabel, std::size(mLabel), L"Target: \u201C%ls\u201D", u.slots[slotIdx].name);
                     Text(mLabel, gpu_.fSmall, Rc(iL, cyBody + 56.0f, iR, cyBody + 74.0f), theme::Muted);
                     const float hw = (iW - 8.0f) * 0.5f;
-                    Button(RcW(iL, cyBody + 80.0f, hw, 28.0f), L"Is running", act::SeqStepCondNegate + 0,
+                    Button(RcW(iL, cyBody + 80.0f, hw, 28.0f), L"Is running",
+                           UiAction{ ActionKind::SeqStepCondNegate, 0 },
                            !neg ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
-                    Button(RcW(iL + hw + 8.0f, cyBody + 80.0f, hw, 28.0f), L"Not running", act::SeqStepCondNegate + 1,
+                    Button(RcW(iL + hw + 8.0f, cyBody + 80.0f, hw, 28.0f), L"Not running",
+                           UiAction{ ActionKind::SeqStepCondNegate, 1 },
                            neg ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
                     cyBody += 118.0f;
                     break;
@@ -570,7 +600,7 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
                     const float qw = (iW - 18.0f) / 4.0f;
                     for (int p = 0; p < 4; ++p) {
                         Button(RcW(iL + static_cast<float>(p) * (qw + 6.0f), cyBody + 60.0f, qw, 28.0f),
-                               kPctLabels[p], act::SeqStepCondQuickPct + p,
+                               kPctLabels[p], UiAction{ ActionKind::SeqStepCondQuickPct, static_cast<int16_t>(p) },
                                pct == kPctVals[p] ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
                     }
                     cyBody += 98.0f;
@@ -579,8 +609,8 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
             }
 
             if (!HasElseInIfBlock(seq, u.selectedSeqStep) && stepCount < kComplexStepMax) {
-                Button(RcW(iL, cyBody, iW, 28.0f), L"+ Add Else branch", act::SeqStepCondAddElse,
-                       BtnStyle::Secondary, gpu_.fSmall);
+                Button(RcW(iL, cyBody, iW, 28.0f), L"+ Add Else branch",
+                       UiAction{ ActionKind::SeqStepCondAddElse }, BtnStyle::Secondary, gpu_.fSmall);
             } else {
                 Text(L"Indented steps run when true; Else runs when false.", gpu_.fSmall,
                      Rc(iL, cyBody, iR, cyBody + 22.0f), theme::Faint);
@@ -612,14 +642,15 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
             const float lw = (iW - 15.0f) / 4.0f;
             for (int l = 0; l < kRemapLayerCount; ++l) {
                 Button(RcW(iL + static_cast<float>(l) * (lw + 5.0f), iy + 22.0f, lw, 30.0f),
-                       LayerName(static_cast<uint8_t>(l)), act::SeqStepLayer + l,
+                       LayerName(static_cast<uint8_t>(l)),
+                       UiAction{ ActionKind::SeqStepLayer, static_cast<int16_t>(l) },
                        (st.param & 3U) == static_cast<uint32_t>(l) ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
             }
             break;
         }
         case ComplexStepKind::ToggleMacro: {
             const uint32_t slotIdx = st.param % static_cast<uint32_t>(kSlotCount);
-            Text(L"Macro slot", gpu_.fSmall, RcW(iL, iy, iW, 18.0f), theme::Muted);
+            Text(L"Autoclicker slot", gpu_.fSmall, RcW(iL, iy, iW, 18.0f), theme::Muted);
             std::swprintf(vbuf, std::size(vbuf), L"#%u", static_cast<unsigned>(slotIdx + 1U));
             GenericField(RcW(iL, iy + 22.0f, iW, 34.0f), Field::SeqStepParam, vbuf, true);
             wchar_t mLabel[64]{};
@@ -629,23 +660,22 @@ inline void UiRenderer::DrawComplexSequenceEditor(const D2D1_RECT_F& panel) noex
         }
     }
 
-    // Bottom Pinned Inspector Actions
     const float footY = rightCard.bottom - 42.0f;
     Line(iL, Snap(footY - 9.0f), iR, Snap(footY - 9.0f), theme::Line, 1.0f, 0.72f);
     const float fw = (iW - 18.0f) / 4.0f;
-    Button(RcW(iL + 0.0f * (fw + 6.0f), footY, fw, 30.0f), L"\u2191 Up",   act::SeqStepUp,   BtnStyle::Ghost,  gpu_.fSmall);
-    Button(RcW(iL + 1.0f * (fw + 6.0f), footY, fw, 30.0f), L"\u2193 Down", act::SeqStepDown, BtnStyle::Ghost,  gpu_.fSmall);
-    Button(RcW(iL + 2.0f * (fw + 6.0f), footY, fw, 30.0f), L"Copy",        act::SeqStepDup,  BtnStyle::Ghost,  gpu_.fSmall);
-    Button(RcW(iL + 3.0f * (fw + 6.0f), footY, fw, 30.0f), L"Delete",      act::SeqStepDel,  BtnStyle::Danger, gpu_.fSmall);
+    Button(RcW(iL + 0.0f * (fw + 6.0f), footY, fw, 30.0f), L"\u2191 Up",   UiAction{ ActionKind::SeqStepUp },   BtnStyle::Ghost,  gpu_.fSmall);
+    Button(RcW(iL + 1.0f * (fw + 6.0f), footY, fw, 30.0f), L"\u2193 Down", UiAction{ ActionKind::SeqStepDown }, BtnStyle::Ghost,  gpu_.fSmall);
+    Button(RcW(iL + 2.0f * (fw + 6.0f), footY, fw, 30.0f), L"Copy",        UiAction{ ActionKind::SeqStepDup },  BtnStyle::Ghost,  gpu_.fSmall);
+    Button(RcW(iL + 3.0f * (fw + 6.0f), footY, fw, 30.0f), L"Delete",      UiAction{ ActionKind::SeqStepDel },  BtnStyle::Danger, gpu_.fSmall);
 }
 
-inline void UiRenderer::DrawStepKindPopover(float W, float H) noexcept {
+void UiRenderer::DrawStepKindPopover(float W, float H) noexcept {
     const auto& u = Ui();
-    Hit(Rc(0.0f, 0.0f, W, H), act::PopoverBackdrop);
+    Hit(Rc(0.0f, 0.0f, W, H), UiAction{ ActionKind::PopoverBackdrop });
 
     const auto& seq = u.SelectedSeq();
     const uint8_t curKind = (u.selectedSeqStep >= 0 && u.selectedSeqStep < static_cast<int>(seq.stepCount))
-        ? seq.steps[u.selectedSeqStep].kind : 0U;
+        ? seq.steps[static_cast<size_t>(u.selectedSeqStep)].kind : 0U;
 
     constexpr float popW = 438.0f;
     constexpr float popH = 236.0f;
@@ -661,7 +691,7 @@ inline void UiRenderer::DrawStepKindPopover(float W, float H) noexcept {
     Fill(Rc(pop.left - 3.0f, pop.top - 3.0f, pop.right + 3.0f, pop.bottom + 7.0f), 12.0f, theme::Window, 0.58f);
     gpu_.FillGlassCard(pop, 10.0f, theme::GlassModalTop, theme::GlassModalBot, theme::GlassBorderHi, 0.24f,
                        Anim().cursorX.value, Anim().cursorY.value, true, ColSignal());
-    Hit(pop, act::ModalSurface);
+    Hit(pop, UiAction{ ActionKind::ModalSurface });
 
     struct ColGroup {
         const wchar_t* title;
@@ -686,9 +716,9 @@ inline void UiRenderer::DrawStepKindPopover(float W, float H) noexcept {
         Text(groups[c].title, gpu_.fMini, RcW(cx + 16.0f, cy, colW - 18.0f, 16.0f), theme::Faint);
         cy += 22.0f;
 
-        for (int r = 0; r < groups[c].count; ++r) {
-            const int k = groups[c].kinds[r];
-            const int actId = act::SeqStepKindBase + k;
+        for (int rowIdx = 0; rowIdx < groups[c].count; ++rowIdx) {
+            const int k = groups[c].kinds[rowIdx];
+            const UiAction actId{ ActionKind::SeqStepKindBase, static_cast<int16_t>(k) };
             const D2D1_RECT_F itemR = RcW(cx, cy, colW, 25.0f);
             const bool active = (curKind == static_cast<uint8_t>(k));
             const bool hov = Hovered(actId);
@@ -709,13 +739,13 @@ inline void UiRenderer::DrawStepKindPopover(float W, float H) noexcept {
 }
 
 // =====================================================================================
-//  2. Reworked Multi-Device / Multi-Monitor Remapping Editor
+//  2. Multi-Device / Multi-Monitor Remapping Editor
 // =====================================================================================
 
-inline void UiRenderer::DrawRemapEditor(const D2D1_RECT_F& panel) noexcept {
+void UiRenderer::DrawRemapEditor(const D2D1_RECT_F& panel) noexcept {
     const auto& u = Ui();
     const int idx = std::clamp(u.selectedIndex, 0, kRemapRuleCount - 1);
-    const auto& r = u.remaps[idx];
+    const auto& r = u.remaps[static_cast<size_t>(idx)];
     const uint8_t bindTarget = frame_.bindTarget;
     const int animIdx = static_cast<int>(AnimSlotFor(ItemKind::Remap, idx));
 
@@ -726,20 +756,21 @@ inline void UiRenderer::DrawRemapEditor(const D2D1_RECT_F& panel) noexcept {
 
     // ---- Header: inline rename | On/Off | Duplicate | Delete ----------------------
     const D2D1_RECT_F delBtn = Rc(R - 80.0f, y + 3.0f, R, y + 33.0f);
-    Button(delBtn, u.pendingDeleteConfirm ? L"Confirm?" : L"Delete", act::DeleteItem,
+    Button(delBtn, u.pendingDeleteConfirm ? L"Confirm?" : L"Delete", UiAction{ ActionKind::DeleteItem },
            u.pendingDeleteConfirm ? BtnStyle::Danger : BtnStyle::Ghost);
 
     const D2D1_RECT_F dupBtn = Rc(delBtn.left - 8.0f - 84.0f, y + 3.0f, delBtn.left - 8.0f, y + 33.0f);
-    Button(dupBtn, L"Duplicate", act::DuplicateItem, BtnStyle::Ghost);
+    Button(dupBtn, L"Duplicate", UiAction{ ActionKind::DuplicateItem }, BtnStyle::Ghost);
 
     const float switchX = dupBtn.left - 16.0f - 36.0f;
-    Switch(switchX, y + 8.0f, r.enabled, act::ToggleEnabled, r.enabled, animIdx);
+    const UiAction toggleAct{ ActionKind::ToggleEnabled };
+    Switch(switchX, y + 8.0f, r.enabled, toggleAct, r.enabled, animIdx);
     Text(r.enabled ? L"On" : L"Off", gpu_.fBody, Rc(switchX - 64.0f, y, switchX - 10.0f, y + 36.0f),
          r.enabled ? ColSignalHi() : theme::Muted, DWRITE_TEXT_ALIGNMENT_TRAILING);
-    Hit(Rc(switchX - 64.0f, y, switchX, y + 36.0f), act::ToggleEnabled);
+    Hit(Rc(switchX - 64.0f, y, switchX, y + 36.0f), toggleAct);
 
     const D2D1_RECT_F nameRect = Rc(L - 8.0f, y, switchX - 72.0f, y + 36.0f);
-    const int nameA = act::FieldFocus + static_cast<int>(Field::RemapName);
+    const UiAction nameA{ ActionKind::FieldFocus, static_cast<int16_t>(Field::RemapName) };
     if (u.editField == Field::RemapName) {
         Fill(nameRect, 6.0f, theme::Inset, 0.92f);
         Stroke(nameRect, 6.0f, ColSignal(), 1.5f);
@@ -754,7 +785,7 @@ inline void UiRenderer::DrawRemapEditor(const D2D1_RECT_F& panel) noexcept {
 
     wchar_t sentence[200]{};
     DescribeRemapRule(r, sentence, std::size(sentence));
-    Text(sentence, gpu_.fBody, Rc(L, y + 36.0f, R, y + 56.0f), r.sourceVk == 0 ? theme::Warn : theme::Muted);
+    Text(sentence, gpu_.fBody, Rc(L, y + 36.0f, R, y + 56.0f), r.sourceVk == 0U ? theme::Warn : theme::Muted);
     y += 60.0f;
 
     // ---- Live Layer & Lock State Strip --------------------------------------------
@@ -766,13 +797,15 @@ inline void UiRenderer::DrawRemapEditor(const D2D1_RECT_F& panel) noexcept {
     for (int l = 0; l < kRemapLayerCount; ++l) {
         const bool active = (frame_.activeRemapLayer == static_cast<uint8_t>(l));
         Button(RcW(lx, liveBar.top + 6.0f, 54.0f, 26.0f), LayerName(static_cast<uint8_t>(l)),
-               act::RemapLiveLayer + l, active ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
+               UiAction{ ActionKind::RemapLiveLayer, static_cast<int16_t>(l) },
+               active ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
         lx += 60.0f;
     }
 
     const D2D1_RECT_F lockBtn = Rc(liveBar.right - 116.0f, liveBar.top + 6.0f, liveBar.right - 10.0f, liveBar.bottom - 6.0f);
     Button(lockBtn, frame_.remapUnlocked ? L"Unlocked" : L"Locked",
-           act::RemapToggleUnlockLive, frame_.remapUnlocked ? BtnStyle::Secondary : BtnStyle::ChipOn, gpu_.fSmall);
+           UiAction{ ActionKind::RemapToggleUnlockLive },
+           frame_.remapUnlocked ? BtnStyle::Secondary : BtnStyle::ChipOn, gpu_.fSmall);
     y = liveBar.bottom + 10.0f;
 
     // ---- Cosmic Hero Mapping Banner: [Source Key] ---> [Mapped Target / Action] ---
@@ -784,14 +817,12 @@ inline void UiRenderer::DrawRemapEditor(const D2D1_RECT_F& panel) noexcept {
 
     const float hL = hero.left + 16.0f;
     const float hR = hero.right - 16.0f;
-    const float midX = (hL + hR) * 0.5f;
     const float srcW = std::clamp((hR - hL) * 0.34f, 148.0f, 210.0f);
 
     Text(L"SOURCE KEY", gpu_.fMini, RcW(hL, hero.top + 10.0f, srcW, 14.0f), theme::Faint);
     const D2D1_RECT_F srcBox = RcW(hL, hero.top + 30.0f, srcW, 38.0f);
-    KeyChip(srcBox, r.sourceVk, act::RemapBindSource, bindTarget == 22U);
+    KeyChip(srcBox, r.sourceVk, UiAction{ ActionKind::RemapBindSource }, bindTarget == 22U);
 
-    // Center glowing directional arrow & action tag
     const float arrowL = srcBox.right + 16.0f;
     const float arrowR = hR - srcW - 16.0f;
     const float arrowLen = std::max(36.0f, arrowR - arrowL);
@@ -805,13 +836,15 @@ inline void UiRenderer::DrawRemapEditor(const D2D1_RECT_F& panel) noexcept {
     const int monCount = std::max(1, std::min(u.monitorCount, 6));
     if (actKind == RemapLayerAction::RemapKey) {
         Text(L"MAPPED TARGET", gpu_.fMini, RcW(tgtX, hero.top + 10.0f, tgtW, 14.0f), theme::Faint);
-        KeyChip(RcW(tgtX, hero.top + 30.0f, tgtW, 38.0f), r.targetVk, act::RemapBindTarget, bindTarget == 23U);
+        KeyChip(RcW(tgtX, hero.top + 30.0f, tgtW, 38.0f), r.targetVk,
+                UiAction{ ActionKind::RemapBindTarget }, bindTarget == 23U);
     } else if (actKind == RemapLayerAction::ShiftLayerHold || actKind == RemapLayerAction::ToggleLayer) {
         Text(L"TARGET LAYER", gpu_.fMini, RcW(tgtX, hero.top + 10.0f, tgtW, 14.0f), theme::Faint);
         const float lw = (tgtW - 12.0f) * 0.25f;
         for (int l = 0; l < kRemapLayerCount; ++l) {
             Button(RcW(tgtX + static_cast<float>(l) * (lw + 4.0f), hero.top + 32.0f, lw, 32.0f),
-                   LayerName(static_cast<uint8_t>(l)), act::RemapTargetLayer + l,
+                   LayerName(static_cast<uint8_t>(l)),
+                   UiAction{ ActionKind::RemapTargetLayer, static_cast<int16_t>(l) },
                    r.targetLayer == static_cast<uint8_t>(l) ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
         }
     } else if (actKind == RemapLayerAction::WarpToMonitor) {
@@ -823,7 +856,8 @@ inline void UiRenderer::DrawRemapEditor(const D2D1_RECT_F& panel) noexcept {
             std::swprintf(ml, std::size(ml), L"Mon %d", m + 1);
             const bool sel = (r.monitorIndex == static_cast<int8_t>(m)) || (r.monitorIndex < 0 && m == 0);
             Button(RcW(tgtX + static_cast<float>(m) * (mw + 4.0f), hero.top + 32.0f, mw, 32.0f),
-                   ml, act::RemapMonitor + 1 + m, sel ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fMini);
+                   ml, UiAction{ ActionKind::RemapMonitor, static_cast<int16_t>(1 + m) },
+                   sel ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fMini);
         }
     } else {
         Text(L"EFFECT", gpu_.fMini, RcW(tgtX, hero.top + 10.0f, tgtW, 14.0f), theme::Faint);
@@ -834,13 +868,11 @@ inline void UiRenderer::DrawRemapEditor(const D2D1_RECT_F& panel) noexcept {
              gpu_.fBodyStrong, badgeR, actKind == RemapLayerAction::BlockKey ? theme::Danger : ColSignalHi(),
              DWRITE_TEXT_ALIGNMENT_CENTER);
     }
-    (void)midX;
     y = hero.bottom + 12.0f;
 
     constexpr float kRowH = 32.0f;
     constexpr float kGap  = 9.0f;
 
-    // ---- Physical Device Selector (Raw Input immediate list) + Filter -------------
     RowLabel(L, y, kRowH, L"Device");
     {
         const float devBtnW = std::min(256.0f, R - C - 252.0f);
@@ -850,23 +882,23 @@ inline void UiRenderer::DrawRemapEditor(const D2D1_RECT_F& panel) noexcept {
         } else {
             wcsncpy_s(devText, r.deviceLabel, _TRUNCATE);
         }
-        Button(RcW(C, y, devBtnW, kRowH), devText, act::RemapCycleDevice, BtnStyle::Secondary, gpu_.fBodyStrong);
+        Button(RcW(C, y, devBtnW, kRowH), devText, UiAction{ ActionKind::RemapCycleDevice }, BtnStyle::Secondary, gpu_.fBodyStrong);
         Button(RcW(C + devBtnW + 6.0f, y + 1.0f, 30.0f, kRowH - 2.0f), L"\u21BB",
-               act::RemapRefreshDevices, BtnStyle::Ghost, gpu_.fBodyStrong);
+               UiAction{ ActionKind::RemapRefreshDevices }, BtnStyle::Ghost, gpu_.fBodyStrong);
 
         static constexpr const wchar_t* kDevKinds[3] = { L"Any", L"Keyboard", L"Mouse" };
         float dx = C + devBtnW + 44.0f;
         for (int k = 0; k < 3; ++k) {
             const float kw = std::ceil(MeasureWidth(kDevKinds[k], gpu_.fSmall)) + 16.0f;
             if (dx + kw > R) break;
-            Button(RcW(dx, y + 3.0f, kw, 26.0f), kDevKinds[k], act::RemapDevKind + k,
+            Button(RcW(dx, y + 3.0f, kw, 26.0f), kDevKinds[k],
+                   UiAction{ ActionKind::RemapDevKind, static_cast<int16_t>(k) },
                    r.deviceKind == static_cast<uint8_t>(k) ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
             dx += kw + 5.0f;
         }
     }
     y += kRowH + kGap;
 
-    // ---- Action Kind --------------------------------------------------------------
     RowLabel(L, y, kRowH, L"Action Kind");
     {
         static constexpr const wchar_t* kActLabels[6] = {
@@ -876,75 +908,75 @@ inline void UiRenderer::DrawRemapEditor(const D2D1_RECT_F& panel) noexcept {
         for (int k = 0; k < 6; ++k) {
             const float aw = std::ceil(MeasureWidth(kActLabels[k], gpu_.fSmall)) + 15.0f;
             if (ax + aw > R) break;
-            Button(RcW(ax, y + 3.0f, aw, 26.0f), kActLabels[k], act::RemapActionKind + k,
+            Button(RcW(ax, y + 3.0f, aw, 26.0f), kActLabels[k],
+                   UiAction{ ActionKind::RemapActionKind, static_cast<int16_t>(k) },
                    r.actionKind == static_cast<uint8_t>(k) ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
             ax += aw + 5.0f;
         }
     }
     y += kRowH + kGap;
 
-    // ---- Rule Layer ---------------------------------------------------------------
     RowLabel(L, y, kRowH, L"Rule Layer");
     {
         float rlx = C;
         for (int l = 0; l < kRemapLayerCount; ++l) {
             Button(RcW(rlx, y + 3.0f, 58.0f, 26.0f), LayerName(static_cast<uint8_t>(l)),
-                   act::RemapRuleLayer + l, r.layerIndex == static_cast<uint8_t>(l) ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
+                   UiAction{ ActionKind::RemapRuleLayer, static_cast<int16_t>(l) },
+                   r.layerIndex == static_cast<uint8_t>(l) ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
             rlx += 64.0f;
         }
     }
     y += kRowH + kGap;
 
-    // ---- Lock State Policy --------------------------------------------------------
     RowLabel(L, y, kRowH, L"Lock State");
     {
         float upx = C;
         for (int p = 0; p < 3; ++p) {
             const wchar_t* pl = UnlockPolicyName(static_cast<RemapUnlockPolicy>(p));
             const float pw = std::ceil(MeasureWidth(pl, gpu_.fSmall)) + 18.0f;
-            Button(RcW(upx, y + 3.0f, pw, 26.0f), pl, act::RemapUnlockPolicy + p,
+            Button(RcW(upx, y + 3.0f, pw, 26.0f), pl,
+                   UiAction{ ActionKind::RemapUnlockPolicy, static_cast<int16_t>(p) },
                    r.unlockPolicy == static_cast<uint8_t>(p) ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
             upx += pw + 6.0f;
         }
     }
     y += kRowH + kGap;
 
-    // ---- Monitor Scope ------------------------------------------------------------
     RowLabel(L, y, kRowH, L"Monitor");
     {
         float mx = C;
-        Button(RcW(mx, y + 3.0f, 56.0f, 26.0f), L"All", act::RemapMonitor + 0,
+        Button(RcW(mx, y + 3.0f, 56.0f, 26.0f), L"All", UiAction{ ActionKind::RemapMonitor, 0 },
                r.monitorIndex < 0 ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
         mx += 62.0f;
         for (int m = 0; m < monCount; ++m) {
             wchar_t mLbl[24]{};
             std::swprintf(mLbl, std::size(mLbl), L"Monitor %d%ls", m + 1,
-                          (m < u.monitorCount && u.monitors[m].isPrimary) ? L"*" : L"");
+                          (m < u.monitorCount && u.monitors[static_cast<size_t>(m)].isPrimary) ? L"*" : L"");
             const float mw = std::ceil(MeasureWidth(mLbl, gpu_.fSmall)) + 16.0f;
             if (mx + mw > R) break;
-            Button(RcW(mx, y + 3.0f, mw, 26.0f), mLbl, act::RemapMonitor + 1 + m,
+            Button(RcW(mx, y + 3.0f, mw, 26.0f), mLbl,
+                   UiAction{ ActionKind::RemapMonitor, static_cast<int16_t>(1 + m) },
                    r.monitorIndex == static_cast<int8_t>(m) ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
             mx += mw + 5.0f;
         }
     }
     y += kRowH + kGap;
 
-    // ---- Suppress Original Key Switch ---------------------------------------------
     RowLabel(L, y, kRowH, L"Suppress");
     const bool suppressOn = r.suppressOriginal || (actKind == RemapLayerAction::BlockKey);
-    Switch(C, y + 6.0f, suppressOn, act::RemapToggleSuppress, false);
+    Switch(C, y + 6.0f, suppressOn, UiAction{ ActionKind::RemapToggleSuppress }, false);
     Text(L"Suppress Original Key from reaching foreground apps", gpu_.fSmall,
          Rc(C + 46.0f, y, R, y + kRowH), theme::Muted);
 }
 
 // =====================================================================================
-//  3. Simplified & Rock-Solid Trigger Bot View
+//  3. Trigger Bot View (Color Match / Color Change + 15x15 Live Loupe)
 // =====================================================================================
 
-inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
+void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
     const auto& u = Ui();
     const int idx = std::clamp(u.selectedIndex, 0, kColorTriggerCount - 1);
-    const auto& t = u.triggers[idx];
+    const auto& t = u.triggers[static_cast<size_t>(idx)];
     const auto& pv = frame_.triggerPreview;
     const uint8_t bindTarget = frame_.bindTarget;
     const int animIdx = static_cast<int>(AnimSlotFor(ItemKind::Trigger, idx));
@@ -954,24 +986,24 @@ inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
     const float C = L + 100.0f;
     float y = panel.top + 14.0f;
 
-    // ---- Header: inline rename | On/Off | Duplicate | Delete ----------------------
     const D2D1_RECT_F delBtn = Rc(R - 80.0f, y + 3.0f, R, y + 33.0f);
-    Button(delBtn, u.pendingDeleteConfirm ? L"Confirm?" : L"Delete", act::DeleteItem,
+    Button(delBtn, u.pendingDeleteConfirm ? L"Confirm?" : L"Delete", UiAction{ ActionKind::DeleteItem },
            u.pendingDeleteConfirm ? BtnStyle::Danger : BtnStyle::Ghost);
 
     const D2D1_RECT_F dupBtn = Rc(delBtn.left - 8.0f - 84.0f, y + 3.0f, delBtn.left - 8.0f, y + 33.0f);
-    Button(dupBtn, L"Duplicate", act::DuplicateItem, BtnStyle::Ghost);
+    Button(dupBtn, L"Duplicate", UiAction{ ActionKind::DuplicateItem }, BtnStyle::Ghost);
 
     const bool matchedLive = pv.isMatched && t.enabled;
     const float switchX = dupBtn.left - 16.0f - 36.0f;
-    Switch(switchX, y + 8.0f, t.enabled, act::ToggleEnabled, matchedLive, animIdx);
+    const UiAction toggleAct{ ActionKind::ToggleEnabled };
+    Switch(switchX, y + 8.0f, t.enabled, toggleAct, matchedLive, animIdx);
     Text(matchedLive ? L"Triggered" : (t.enabled ? L"On" : L"Off"), gpu_.fBody,
          Rc(switchX - 78.0f, y, switchX - 10.0f, y + 36.0f),
          matchedLive ? theme::Ok : theme::Muted, DWRITE_TEXT_ALIGNMENT_TRAILING);
-    Hit(Rc(switchX - 78.0f, y, switchX, y + 36.0f), act::ToggleEnabled);
+    Hit(Rc(switchX - 78.0f, y, switchX, y + 36.0f), toggleAct);
 
     const D2D1_RECT_F nameRect = Rc(L - 8.0f, y, switchX - 86.0f, y + 36.0f);
-    const int nameA = act::FieldFocus + static_cast<int>(Field::TriggerName);
+    const UiAction nameA{ ActionKind::FieldFocus, static_cast<int16_t>(Field::TriggerName) };
     if (u.editField == Field::TriggerName) {
         Fill(nameRect, 6.0f, theme::Inset, 0.92f);
         Stroke(nameRect, 6.0f, ColSignal(), 1.5f);
@@ -989,7 +1021,6 @@ inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
     Text(sentence, gpu_.fBody, Rc(L, y + 36.0f, R, y + 54.0f), theme::Muted);
     y += 58.0f;
 
-    // ---- Hero Glass Card: 15x15 Live Pixel Loupe | Swatches & Delta | Tolerance ---
     const float cardH = 148.0f;
     const D2D1_RECT_F card = Rc(L, y, R, y + cardH);
     GlassCard(card, 11.0f, true, matchedLive,
@@ -1002,7 +1033,6 @@ inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
     Fill(loupeFrame, 8.0f, theme::Window, 0.96f);
     Stroke(loupeFrame, 8.0f, loupeBorder, matchedLive ? 1.8f : 1.0f);
 
-    // 15x15 Zoomed Pixel Loupe with aliased crisp squares, cyan match highlights, & crosshair
     {
         constexpr int N = mask::triggers::ColorTriggerPreviewSnapshot::kLoupeSize; // 15
         const float gridL = loupeFrame.left + 3.0f;
@@ -1015,14 +1045,14 @@ inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
             ctx->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
         }
 
-        for (int py = 0; py < N; ++py) {
-            for (int px = 0; px < N; ++px) {
-                const uint8_t pMask = pv.loupeMatchMask[py * N + px];
+        for (int ly = 0; ly < N; ++ly) {
+            for (int lx = 0; lx < N; ++lx) {
+                const uint8_t pMask = pv.loupeMatchMask[static_cast<size_t>(ly * N + lx)];
                 const bool inZone = (pMask & 1U) != 0U;
                 const bool pixHit = (pMask & 2U) != 0U;
-                const D2D1_RECT_F pxR = RcW(gridL + static_cast<float>(px) * cell,
-                                            gridT + static_cast<float>(py) * cell, cell, cell);
-                const uint32_t rgb = pv.loupePixels[py * N + px] & 0x00FFFFFFU;
+                const D2D1_RECT_F pxR = RcW(gridL + static_cast<float>(lx) * cell,
+                                            gridT + static_cast<float>(ly) * cell, cell, cell);
+                const uint32_t rgb = pv.loupePixels[static_cast<size_t>(ly * N + lx)] & 0x00FFFFFFU;
                 Fill(pxR, 0.0f, rgb, 1.0f);
                 if (!inZone) {
                     Fill(pxR, 0.0f, theme::Window, 0.48f);
@@ -1033,9 +1063,9 @@ inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
                 }
             }
         }
-        for (int i = 1; i < N; ++i) {
-            const float gx = gridL + static_cast<float>(i) * cell;
-            const float gy = gridT + static_cast<float>(i) * cell;
+        for (int gIdx = 1; gIdx < N; ++gIdx) {
+            const float gx = gridL + static_cast<float>(gIdx) * cell;
+            const float gy = gridT + static_cast<float>(gIdx) * cell;
             Line(gx, gridT, gx, gridT + cell * N, 0x000000U, 1.0f, 0.25f);
             Line(gridL, gy, gridL + cell * N, gy, 0x000000U, 1.0f, 0.25f);
         }
@@ -1050,7 +1080,6 @@ inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
             Stroke(roiR, 0.0f, ColSignalHi(), 1.2f, 0.78f);
         }
 
-        // High-contrast center pixel crosshair
         const D2D1_RECT_F cCell = RcW(gridL + static_cast<float>(half) * cell,
                                       gridT + static_cast<float>(half) * cell, cell, cell);
         Stroke(Rc(cCell.left - 1.0f, cCell.top - 1.0f, cCell.right + 1.0f, cCell.bottom + 1.0f), 0.0f, 0x000000U, 1.0f, 0.78f);
@@ -1065,7 +1094,6 @@ inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
     const float rr = card.right - 14.0f;
     float ry = card.top + 10.0f;
 
-    // Hero Row 1: Current RGB vs Target RGB + Delta + DXGI/GDI us + Triggered badge
     {
         const UINT32 liveRgb = (static_cast<UINT32>(pv.sampledR) << 16) |
                                (static_cast<UINT32>(pv.sampledG) << 8)  |
@@ -1106,7 +1134,6 @@ inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
             rightOfTarget = swTgt.right + 75.0f;
         }
 
-        // Status pill: Triggered | Watching | Standby | Off
         const wchar_t* stTxt = !t.enabled ? L"Off"
                              : (matchedLive ? L"Triggered" : (pv.isArmed ? L"Watching" : L"Standby"));
         const UINT32 stCol = !t.enabled ? theme::Faint
@@ -1116,7 +1143,6 @@ inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
         Stroke(pill, 11.0f, stCol, 1.0f, t.enabled ? 0.78f : 0.35f);
         Text(stTxt, gpu_.fSmall, pill, stCol, DWRITE_TEXT_ALIGNMENT_CENTER);
 
-        // DXGI/GDI status & pipeline timing (us) + delta indicator
         wchar_t infoTxt[48]{};
         const uint32_t us = (pv.avgPipelineUs > 0U) ? pv.avgPipelineUs : pv.lastPipelineUs;
         std::swprintf(infoTxt, std::size(infoTxt), L"%ls \u00B7 %u us \u00B7 \u0394%u",
@@ -1135,27 +1161,28 @@ inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
         ry += 34.0f;
     }
 
-    // Hero Row 2: Pick on Screen + Screen Center + Color Presets (MatchColor)
     {
         const bool isCenter = (t.sampleX < 0 || t.sampleY < 0);
         Button(RcW(rx, ry, 126.0f, 27.0f),
                u.triggerColorPickActive ? L"Click screen\u2026" : L"Pick on Screen",
-               act::TrigPickPixel, u.triggerColorPickActive ? BtnStyle::Primary : BtnStyle::Secondary, gpu_.fSmall);
-        Button(RcW(rx + 132.0f, ry, 102.0f, 27.0f), L"Screen Center", act::TrigLockCenter,
+               UiAction{ ActionKind::TrigPickPixel },
+               u.triggerColorPickActive ? BtnStyle::Primary : BtnStyle::Secondary, gpu_.fSmall);
+        Button(RcW(rx + 132.0f, ry, 102.0f, 27.0f), L"Screen Center",
+               UiAction{ ActionKind::TrigLockCenter },
                isCenter ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
 
         const auto mKind = static_cast<ColorTriggerMode>(t.mode);
         if (mKind == ColorTriggerMode::MatchColor) {
             float px = rx + 242.0f;
             const float cy = ry + 13.5f;
-            for (int i = 0; i < kTriggerColorPresetCount; ++i) {
+            for (int p = 0; p < kTriggerColorPresetCount; ++p) {
                 if (px + 20.0f > rr + 2.0f) break;
-                const auto& p = kTriggerColorPresets[i];
-                const UINT32 pRgb = (static_cast<UINT32>(p.r) << 16) | (static_cast<UINT32>(p.g) << 8) | static_cast<UINT32>(p.b);
-                const bool matchPreset = (std::abs(static_cast<int>(t.r) - static_cast<int>(p.r)) <= 6 &&
-                                          std::abs(static_cast<int>(t.g) - static_cast<int>(p.g)) <= 6 &&
-                                          std::abs(static_cast<int>(t.b) - static_cast<int>(p.b)) <= 6);
-                const int actId = act::TrigColorPreset + i;
+                const auto& pr = kTriggerColorPresets[p];
+                const UINT32 pRgb = (static_cast<UINT32>(pr.r) << 16) | (static_cast<UINT32>(pr.g) << 8) | static_cast<UINT32>(pr.b);
+                const bool matchPreset = (std::abs(static_cast<int>(t.r) - static_cast<int>(pr.r)) <= 6 &&
+                                          std::abs(static_cast<int>(t.g) - static_cast<int>(pr.g)) <= 6 &&
+                                          std::abs(static_cast<int>(t.b) - static_cast<int>(pr.b)) <= 6);
+                const UiAction actId{ ActionKind::TrigColorPreset, static_cast<int16_t>(p) };
                 const bool hov = Hovered(actId);
                 const float cx = px + 10.0f;
                 if (matchPreset || hov) {
@@ -1173,7 +1200,6 @@ inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
         ry += 35.0f;
     }
 
-    // Hero Row 3: Tolerance Smooth Glass Slider (0..150)
     {
         Text(L"Tolerance", gpu_.fSmall, RcW(rx, ry, 140.0f, 18.0f), theme::Muted);
         wchar_t tolDesc[40]{};
@@ -1188,7 +1214,8 @@ inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
 
         const float frac = std::clamp(static_cast<float>(t.tolerance) / 150.0f, 0.0f, 1.0f);
         const float thumbX = trL + frac * std::max(0.0f, trR - trL);
-        const bool hot = (u.draggingTriggerSlider == act::TrigSliderTol) || Hovered(act::TrigSliderTol);
+        const UiAction tolAct{ ActionKind::TrigSliderTol };
+        const bool hot = (u.draggingTriggerSlider == tolAct) || Hovered(tolAct);
 
         Fill(Rc(trL, trackY - 3.0f, trR, trackY + 3.0f), 3.0f, theme::Panel, 0.90f);
         Stroke(Rc(trL, trackY - 3.0f, trR, trackY + 3.0f), 3.0f, theme::Line);
@@ -1201,7 +1228,7 @@ inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
         }
         Dot(thumbX, trackY, 7.5f, ColSignal());
         Dot(thumbX, trackY, 2.8f, theme::IceCore);
-        Hit(Rc(rx, trackY - 12.0f, rr, trackY + 12.0f), act::TrigSliderTol);
+        Hit(Rc(rx, trackY - 12.0f, rr, trackY + 12.0f), tolAct);
 
         Text(L"Exact (0)", gpu_.fMini, RcW(rx, ry + 39.0f, 90.0f, 14.0f), theme::Faint);
         Text(L"Wide (150)", gpu_.fMini, Rc(rr - 100.0f, ry + 39.0f, rr, ry + 53.0f), theme::Faint, DWRITE_TEXT_ALIGNMENT_TRAILING);
@@ -1209,12 +1236,11 @@ inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
 
     y = card.bottom + 10.0f;
 
-    // ---- Parameter Rows (strictly solid, zero dead features) ----------------------
     constexpr float kRowH = 30.0f;
     constexpr float kGap  = 7.0f;
 
     auto drawSegmented = [&](float sx, float sy, float sw, const wchar_t* const* labels,
-                             int count, int curVal, int baseAction) noexcept {
+                             int count, int curVal, ActionKind baseKind) noexcept {
         const D2D1_RECT_F seg = RcW(sx, sy, sw, kRowH);
         Fill(seg, 8.0f, theme::Inset, 0.85f);
         Stroke(seg, 8.0f, theme::Line, 1.0f, 0.85f);
@@ -1223,7 +1249,7 @@ inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
             const D2D1_RECT_F cell = RcW(seg.left + 3.0f + cellW * static_cast<float>(m),
                                          seg.top + 3.0f, cellW, kRowH - 6.0f);
             const bool sel = (curVal == m);
-            const int actId = baseAction + m;
+            const UiAction actId{ baseKind, static_cast<int16_t>(m) };
             if (sel) {
                 gpu_.FillLinearRect(cell, 6.0f, theme::RaisedHi, 0.95f, theme::Raised, 0.90f, false);
                 GlowLine(cell.left + 10.0f, cell.bottom - 1.5f, cell.right - 10.0f, cell.bottom - 1.5f,
@@ -1237,20 +1263,17 @@ inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
         }
     };
 
-    // 1. Detection Mode (2 pills): Color Match | Color Change
     RowLabel(L, y, kRowH, L"Mode");
     static constexpr const wchar_t* kTrigModeLbls[2] = { L"Color Match", L"Color Change" };
-    drawSegmented(C, y, 250.0f, kTrigModeLbls, 2, static_cast<int>(t.mode), act::TrigMode);
+    drawSegmented(C, y, 250.0f, kTrigModeLbls, 2, static_cast<int>(t.mode), ActionKind::TrigMode);
     y += kRowH + kGap;
 
-    // 2. Match Rule (2 pills): Any Pixel | Zone Average
     RowLabel(L, y, kRowH, L"Match Rule");
     static constexpr const wchar_t* kRuleLbls[2] = { L"Any Pixel", L"Zone Average" };
     const int curRule = (GetTriggerMatchRule(t) == ColorTriggerMatchRule::ZoneAverage) ? 1 : 0;
-    drawSegmented(C, y, 250.0f, kRuleLbls, 2, curRule, act::TrigMatchRule);
+    drawSegmented(C, y, 250.0f, kRuleLbls, 2, curRule, ActionKind::TrigMatchRule);
     y += kRowH + kGap;
 
-    // 3. Zone Size chips: 1x1, 3x3, 5x5, 9x9, 15x15
     RowLabel(L, y, kRowH, L"Zone Size");
     {
         float zx = C;
@@ -1259,20 +1282,20 @@ inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
         for (int k = 0; k < 5; ++k) {
             const float kw = (k == 4) ? 54.0f : 46.0f;
             if (zx + kw > R) break;
-            Button(RcW(zx, y + 3.0f, kw, 24.0f), kRadLbls[k], act::TrigRadius + k,
+            Button(RcW(zx, y + 3.0f, kw, 24.0f), kRadLbls[k],
+                   UiAction{ ActionKind::TrigRadius, static_cast<int16_t>(k) },
                    t.sampleRadius == kRadVals[k] ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
             zx += kw + 5.0f;
         }
     }
     y += kRowH + kGap;
 
-    // 4. Monitor selector
     RowLabel(L, y, kRowH, L"Monitor");
     {
         const int monCount = std::max(1, std::min(u.monitorCount, 8));
         float mx = C;
         for (int m = 0; m < monCount; ++m) {
-            const auto& mn = u.monitors[m];
+            const auto& mn = u.monitors[static_cast<size_t>(m)];
             wchar_t mLbl[36]{};
             if (monCount <= 2) {
                 std::swprintf(mLbl, std::size(mLbl), L"Monitor %d (%dx%d)%ls",
@@ -1283,64 +1306,63 @@ inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
             }
             const float mw = std::ceil(MeasureWidth(mLbl, gpu_.fSmall)) + 18.0f;
             if (mx + mw > R) break;
-            Button(RcW(mx, y + 3.0f, mw, 24.0f), mLbl, act::TrigMonitor + m,
+            Button(RcW(mx, y + 3.0f, mw, 24.0f), mLbl,
+                   UiAction{ ActionKind::TrigMonitor, static_cast<int16_t>(m) },
                    t.monitorIndex == static_cast<uint8_t>(m) ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
             mx += mw + 5.0f;
         }
     }
     y += kRowH + kGap;
 
-    // 5. Arming: Always Active | While Key Held | Toggle Key + Bind Arm Key / Clear
     RowLabel(L, y, kRowH, L"Arming");
     static constexpr const wchar_t* kArmLbls[3] = { L"Always Active", L"While Key Held", L"Toggle Key" };
-    drawSegmented(C, y, 312.0f, kArmLbls, 3, t.armMode, act::TrigArmMode);
+    drawSegmented(C, y, 312.0f, kArmLbls, 3, t.armMode, ActionKind::TrigArmMode);
     if (t.armMode != 0U) {
-        KeyChip(RcW(C + 322.0f, y, 130.0f, kRowH), t.armVk, act::TrigBindArmVk, bindTarget == 26U);
+        KeyChip(RcW(C + 322.0f, y, 130.0f, kRowH), t.armVk, UiAction{ ActionKind::TrigBindArmVk }, bindTarget == 26U);
         if (t.armVk != 0U) {
-            Button(RcW(C + 458.0f, y + 3.0f, 24.0f, 24.0f), L"\u00D7", act::TrigClearArmVk, BtnStyle::Ghost, gpu_.fBodyStrong);
+            Button(RcW(C + 458.0f, y + 3.0f, 24.0f, 24.0f), L"\u00D7",
+                   UiAction{ ActionKind::TrigClearArmVk }, BtnStyle::Ghost, gpu_.fBodyStrong);
         }
     }
     y += kRowH + kGap;
 
-    // 6. Action Kind (4 pills): Click Key | Hold Key | Run Macro | Run Sequence
     RowLabel(L, y, kRowH, L"Action");
-    static constexpr const wchar_t* kActLbls[4] = { L"Click Key", L"Hold Key", L"Run Macro", L"Run Sequence" };
-    drawSegmented(C, y, std::min(392.0f, R - C), kActLbls, 4, t.actionKind, act::TrigActionKind);
+    static constexpr const wchar_t* kActLbls[4] = { L"Click Key", L"Hold Key", L"Run Clicker", L"Run Sequence" };
+    drawSegmented(C, y, std::min(392.0f, R - C), kActLbls, 4, t.actionKind, ActionKind::TrigActionKind);
     y += kRowH + kGap;
 
-    // 7. Output / Linked Target
     const auto actKind = static_cast<ColorTriggerActionKind>(t.actionKind);
     const bool isKeyAct = (actKind == ColorTriggerActionKind::ClickKey ||
                            actKind == ColorTriggerActionKind::HoldKey);
     RowLabel(L, y, kRowH, isKeyAct ? L"Output" : L"Target");
     if (isKeyAct) {
-        KeyChip(RcW(C, y, 138.0f, kRowH), t.actionVk, act::TrigBindActionVk, bindTarget == 27U);
+        KeyChip(RcW(C, y, 138.0f, kRowH), t.actionVk, UiAction{ ActionKind::TrigBindActionVk }, bindTarget == 27U);
         static constexpr uint16_t kQuickVks[4] = { VK_LBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2 };
         static constexpr const wchar_t* kQuickLbls[4] = { L"Left click", L"Right click", L"Mouse 4", L"Mouse 5" };
         float qx = C + 148.0f;
         for (int q = 0; q < 4; ++q) {
             const float qw = std::ceil(MeasureWidth(kQuickLbls[q], gpu_.fSmall)) + 14.0f;
             if (qx + qw > R) break;
-            Button(RcW(qx, y + 3.0f, qw, 24.0f), kQuickLbls[q], act::TrigQuickOut + q,
+            Button(RcW(qx, y + 3.0f, qw, 24.0f), kQuickLbls[q],
+                   UiAction{ ActionKind::TrigQuickOut, static_cast<int16_t>(q) },
                    t.actionVk == kQuickVks[q] ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
             qx += qw + 5.0f;
         }
     } else {
-        const bool isMacro = (actKind == ColorTriggerActionKind::RunMacroSlot);
-        const uint32_t maxSlots = isMacro ? static_cast<uint32_t>(kSlotCount) : static_cast<uint32_t>(kComplexSeqCount);
+        const bool isClicker = (actKind == ColorTriggerActionKind::RunMacroSlot);
+        const uint32_t maxSlots = isClicker ? static_cast<uint32_t>(kSlotCount) : static_cast<uint32_t>(kComplexSeqCount);
         const uint32_t slotIdx = t.linkedIndex % maxSlots;
         wchar_t slotStr[24]{};
         std::swprintf(slotStr, std::size(slotStr), L"#%u", static_cast<unsigned>(slotIdx + 1U));
         GenericField(RcW(C, y, 114.0f, kRowH), Field::TriggerLinked, slotStr, true);
 
-        const wchar_t* linkedName = isMacro ? u.slots[slotIdx].name : u.sequences[slotIdx].name;
+        const wchar_t* linkedName = isClicker ? u.slots[slotIdx].name : u.sequences[slotIdx].name;
         wchar_t targetLbl[64]{};
         std::swprintf(targetLbl, std::size(targetLbl), L"\u201C%ls\u201D", linkedName);
         Text(targetLbl, gpu_.fBody, Rc(C + 126.0f, y, R, y + kRowH), theme::Muted);
     }
     y += kRowH + kGap;
 
-    // 8. Reaction Timing (Delay / Hold / Cooldown)
     RowLabel(L, y, kRowH, L"Timing");
     wchar_t dBuf[24]{}, hBuf[24]{}, cBuf[24]{};
     std::swprintf(dBuf, std::size(dBuf), L"%u ms", static_cast<unsigned>(t.delayMs));
@@ -1364,22 +1386,20 @@ inline void UiRenderer::DrawTriggerEditor(const D2D1_RECT_F& panel) noexcept {
 }
 
 // =====================================================================================
-//  4. 5-Tab Cosmic Settings Menu
+//  4. 5-Tab Cosmic Settings Overlay
 // =====================================================================================
 
-inline void UiRenderer::DrawSettingsView(const D2D1_RECT_F& panel) noexcept {
+void UiRenderer::DrawSettingsOverlay(const D2D1_RECT_F& panel) noexcept {
     const auto& u = Ui();
     const auto& a = Anim();
     const float L = panel.left + 22.0f;
     const float R = panel.right - 22.0f;
     float y = panel.top + 12.0f;
 
-    // Header
-    Button(Rc(R - 74.0f, y + 2.0f, R, y + 32.0f), L"Done", act::ToggleSettings, BtnStyle::Secondary);
+    Button(Rc(R - 74.0f, y + 2.0f, R, y + 32.0f), L"Done", UiAction{ ActionKind::ToggleSettings }, BtnStyle::Secondary);
     Text(L"Settings", gpu_.fTitle, Rc(L, y, R - 86.0f, y + 34.0f), theme::Text);
     y += 40.0f;
 
-    // Animated 5-tab strip
     static constexpr const wchar_t* kTabNames[5] = {
         L"General", L"Appearance", L"Performance", L"Hotkeys", L"Hardware & Profiles"
     };
@@ -1397,13 +1417,13 @@ inline void UiRenderer::DrawSettingsView(const D2D1_RECT_F& panel) noexcept {
     }
     for (int i = 0; i < 5; ++i) {
         const float tw = stripInnerW * (tabWeights[i] / std::max(1.0f, totalWeight));
-        settingsTabRects_[i] = Rc(tx, tabStrip.top + 3.0f, tx + tw, tabStrip.bottom - 3.0f);
+        settingsTabRects_[static_cast<size_t>(i)] = Rc(tx, tabStrip.top + 3.0f, tx + tw, tabStrip.bottom - 3.0f);
         tx += tw;
     }
 
     const int curTab = std::clamp(u.settingsTab, 0, 4);
-    const float indX = (a.settingsTabX.value > 1.0f) ? a.settingsTabX.value : settingsTabRects_[curTab].left;
-    const float indW = (a.settingsTabW.value > 10.0f) ? a.settingsTabW.value : (settingsTabRects_[curTab].right - settingsTabRects_[curTab].left);
+    const float indX = (a.settingsTabX.value > 1.0f) ? a.settingsTabX.value : settingsTabRects_[static_cast<size_t>(curTab)].left;
+    const float indW = (a.settingsTabW.value > 10.0f) ? a.settingsTabW.value : (settingsTabRects_[static_cast<size_t>(curTab)].right - settingsTabRects_[static_cast<size_t>(curTab)].left);
     const D2D1_RECT_F pillR = RcW(indX, tabStrip.top + 3.0f, indW, 28.0f);
     gpu_.FillLinearRect(pillR, 6.0f, theme::RaisedHi, 0.95f, theme::Raised, 0.90f, false);
     GlowLine(pillR.left + 12.0f, pillR.bottom - 1.5f, pillR.right - 12.0f, pillR.bottom - 1.5f,
@@ -1411,34 +1431,33 @@ inline void UiRenderer::DrawSettingsView(const D2D1_RECT_F& panel) noexcept {
 
     for (int i = 0; i < 5; ++i) {
         const bool sel = (curTab == i);
-        const int actId = act::SettingsTab + i;
-        if (!sel && Hovered(actId)) Fill(settingsTabRects_[i], 6.0f, theme::Raised, 0.55f);
-        Text(kTabNames[i], sel ? gpu_.fBodyStrong : gpu_.fBody, settingsTabRects_[i],
+        const UiAction actId{ ActionKind::SettingsTab, static_cast<int16_t>(i) };
+        if (!sel && Hovered(actId)) Fill(settingsTabRects_[static_cast<size_t>(i)], 6.0f, theme::Raised, 0.55f);
+        Text(kTabNames[i], sel ? gpu_.fBodyStrong : gpu_.fBody, settingsTabRects_[static_cast<size_t>(i)],
              (sel || Hovered(actId)) ? theme::Text : theme::Muted, DWRITE_TEXT_ALIGNMENT_CENTER);
-        Hit(settingsTabRects_[i], actId);
+        Hit(settingsTabRects_[static_cast<size_t>(i)], actId);
     }
     y = tabStrip.bottom + 12.0f;
 
     const auto& s = u.settings;
 
-    auto toggleRow = [&](float& ry, const wchar_t* title, const wchar_t* sub, bool val, int action) noexcept {
+    auto toggleRow = [&](float& ry, const wchar_t* title, const wchar_t* sub, bool val, ActionKind actionKind) noexcept {
         const D2D1_RECT_F rowR = Rc(L, ry, R, ry + 43.0f);
         Fill(rowR, 8.0f, theme::Inset, 0.78f);
         Stroke(rowR, 8.0f, theme::Line, 1.0f, 0.80f);
         Text(title, gpu_.fBodyStrong, Rc(L + 14.0f, ry + 4.0f, R - 64.0f, ry + 22.0f), theme::Text);
         Text(sub, gpu_.fSmall, Rc(L + 14.0f, ry + 21.0f, R - 64.0f, ry + 39.0f), theme::Faint);
-        Switch(R - 50.0f, ry + 11.5f, val, action);
+        Switch(R - 50.0f, ry + 11.5f, val, UiAction{ actionKind });
         ry += 48.0f;
     };
 
     if (curTab == 0) {
-        // ---- Tab 0: General -------------------------------------------------------
-        toggleRow(y, L"Start with Windows", L"Launch Mask automatically at sign-in.", s.startWithWindows, act::SetToggleStartWin);
-        toggleRow(y, L"Start minimized", L"Open quietly in the background.", s.startMinimized, act::SetToggleStartMin);
-        toggleRow(y, L"Minimize to system tray", L"Hide the taskbar button when minimized.", s.minimizeToTray, act::SetToggleMinTray);
-        toggleRow(y, L"Always on top", L"Keep Mask above other windows.", s.alwaysOnTop, act::SetToggleTopmost);
-        toggleRow(y, L"Remember window bounds", L"Restore window size and monitor position.", s.rememberWindowBounds, act::SetToggleBounds);
-        toggleRow(y, L"Confirm before deleting", L"Require a second click on Delete.", s.confirmDelete, act::SetToggleConfirmDel);
+        toggleRow(y, L"Start with Windows", L"Launch Mask automatically at sign-in.", s.startWithWindows, ActionKind::SetToggleStartWin);
+        toggleRow(y, L"Start minimized", L"Open quietly in the background.", s.startMinimized, ActionKind::SetToggleStartMin);
+        toggleRow(y, L"Minimize to system tray", L"Hide the taskbar button when minimized.", s.minimizeToTray, ActionKind::SetToggleMinTray);
+        toggleRow(y, L"Always on top", L"Keep Mask above other windows.", s.alwaysOnTop, ActionKind::SetToggleTopmost);
+        toggleRow(y, L"Remember window bounds", L"Restore window size and monitor position.", s.rememberWindowBounds, ActionKind::SetToggleBounds);
+        toggleRow(y, L"Confirm before deleting", L"Require a second click on Delete.", s.confirmDelete, ActionKind::SetToggleConfirmDel);
 
         const D2D1_RECT_F rowR = Rc(L, y, R, y + 46.0f);
         Fill(rowR, 8.0f, theme::Inset, 0.78f);
@@ -1449,7 +1468,6 @@ inline void UiRenderer::DrawSettingsView(const D2D1_RECT_F& panel) noexcept {
         std::swprintf(asBuf, std::size(asBuf), L"%u ms", static_cast<unsigned>(s.autosaveDelayMs));
         GenericField(Rc(R - 144.0f, y + 8.0f, R - 12.0f, y + 38.0f), Field::SettingsAutosaveMs, asBuf, true);
     } else if (curTab == 1) {
-        // ---- Tab 1: Appearance ----------------------------------------------------
         {
             const D2D1_RECT_F box = Rc(L, y, R, y + 54.0f);
             Fill(box, 8.0f, theme::Inset, 0.78f);
@@ -1459,7 +1477,8 @@ inline void UiRenderer::DrawSettingsView(const D2D1_RECT_F& panel) noexcept {
             static constexpr const wchar_t* kQual[3] = { L"Full", L"Reduced", L"Off" };
             float qx = R - 238.0f;
             for (int q = 0; q < 3; ++q) {
-                Button(RcW(qx, y + 13.0f, 72.0f, 28.0f), kQual[q], act::SetAnimQuality + q,
+                Button(RcW(qx, y + 13.0f, 72.0f, 28.0f), kQual[q],
+                       UiAction{ ActionKind::SetAnimQuality, static_cast<int16_t>(q) },
                        s.animationQuality == static_cast<uint8_t>(q) ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
                 qx += 78.0f;
             }
@@ -1474,7 +1493,7 @@ inline void UiRenderer::DrawSettingsView(const D2D1_RECT_F& panel) noexcept {
                 const auto pal = mask::ui::GetAccentPalette(static_cast<uint8_t>(acc));
                 const D2D1_RECT_F sr = RcW(L + 14.0f + static_cast<float>(acc) * (swW + 8.0f), y + 32.0f, swW, 32.0f);
                 const bool sel = (s.accentPreset == static_cast<uint8_t>(acc));
-                const int actId = act::SetAccent + acc;
+                const UiAction actId{ ActionKind::SetAccent, static_cast<int16_t>(acc) };
                 Fill(sr, 7.0f, sel ? pal.signal : theme::Raised, sel ? 0.18f : 0.85f);
                 Stroke(sr, 7.0f, sel ? pal.signal : (Hovered(actId) ? theme::LineHi : theme::Line), sel ? 1.5f : 1.0f);
                 if (sel) {
@@ -1489,40 +1508,40 @@ inline void UiRenderer::DrawSettingsView(const D2D1_RECT_F& panel) noexcept {
             }
             y += 84.0f;
         }
-        toggleRow(y, L"Compact sidebar", L"Use single-line workspace rows.", s.compactSidebar, act::SetToggleCompact);
-        toggleRow(y, L"Signal view", L"Display the glowing pulse oscilloscope in Macro view.", s.showSignalView, act::SetToggleSignal);
-        toggleRow(y, L"Live indicators", L"Highlight keycaps while physical keys are held down.", s.showLiveKeyIndicators, act::SetToggleLiveKeys);
+        toggleRow(y, L"Compact sidebar", L"Use single-line workspace rows.", s.compactSidebar, ActionKind::SetToggleCompact);
+        toggleRow(y, L"Signal view", L"Display the glowing pulse oscilloscope in Autoclicker view.", s.showSignalView, ActionKind::SetToggleSignal);
+        toggleRow(y, L"Live indicators", L"Highlight keycaps while physical keys are held down.", s.showLiveKeyIndicators, ActionKind::SetToggleLiveKeys);
     } else if (curTab == 2) {
-        // ---- Tab 2: Performance ---------------------------------------------------
-        toggleRow(y, L"Focused-only background performance", L"Pause cosmic shader animation and live preview when unfocused.", s.lowResourceWhenUnfocused, act::SetToggleLowRes);
-        toggleRow(y, L"Memory + GPU trim on minimize", L"Release GPU staging buffers and RAM pages when minimized.", s.trimMemoryWhenMinimized, act::SetToggleTrimMem);
+        toggleRow(y, L"Focused-only background performance", L"Pause cosmic shader animation and live preview when unfocused.", s.lowResourceWhenUnfocused, ActionKind::SetToggleLowRes);
+        toggleRow(y, L"Memory + GPU trim on minimize", L"Release GPU staging buffers and RAM pages when minimized.", s.trimMemoryWhenMinimized, ActionKind::SetToggleTrimMem);
 
-        auto choiceRow = [&](float& ry, const wchar_t* title, const wchar_t* sub, const wchar_t* const* labels, int cur, int baseAct) noexcept {
+        auto choiceRow = [&](float& ry, const wchar_t* title, const wchar_t* sub,
+                             const wchar_t* const* labels, int cur, ActionKind baseKind) noexcept {
             const D2D1_RECT_F box = Rc(L, ry, R, ry + 54.0f);
             Fill(box, 8.0f, theme::Inset, 0.78f);
             Stroke(box, 8.0f, theme::Line, 1.0f, 0.80f);
             Text(title, gpu_.fBodyStrong, Rc(L + 14.0f, ry + 6.0f, R - 290.0f, ry + 26.0f), theme::Text);
             Text(sub, gpu_.fSmall, Rc(L + 14.0f, ry + 26.0f, R - 290.0f, ry + 46.0f), theme::Faint);
             float cx = R - 282.0f;
-            for (int i = 0; i < 3; ++i) {
-                Button(RcW(cx, ry + 13.0f, 88.0f, 28.0f), labels[i], baseAct + i,
-                       cur == i ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
+            for (int cIdx = 0; cIdx < 3; ++cIdx) {
+                Button(RcW(cx, ry + 13.0f, 88.0f, 28.0f), labels[cIdx],
+                       UiAction{ baseKind, static_cast<int16_t>(cIdx) },
+                       cur == cIdx ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
                 cx += 92.0f;
             }
             ry += 62.0f;
         };
 
         static constexpr const wchar_t* kPowerLabels[3] = { L"Balanced", L"Max Perf", L"Eco" };
-        choiceRow(y, L"Power mode", L"Polling cadence and timer precision.", kPowerLabels, s.powerMode, act::SetPowerMode);
+        choiceRow(y, L"Power mode", L"Polling cadence and timer precision.", kPowerLabels, s.powerMode, ActionKind::SetPowerMode);
 
         static constexpr const wchar_t* kPollLabels[3] = { L"250 Hz", L"500 Hz", L"1000 Hz" };
         const int pollIdx = (s.armedPollHz <= 375U) ? 0 : (s.armedPollHz <= 750U ? 1 : 2);
-        choiceRow(y, L"Armed poll Hz", L"Physical input check rate while armed.", kPollLabels, pollIdx, act::SetPollHz);
+        choiceRow(y, L"Armed poll Hz", L"Physical input check rate while armed.", kPollLabels, pollIdx, ActionKind::SetPollHz);
 
         static constexpr const wchar_t* kSpinLabels[3] = { L"Auto", L"Max Prec", L"Eco" };
-        choiceRow(y, L"Pacing policy", L"Final RDTSCP wait window before firing.", kSpinLabels, s.spinPolicy, act::SetSpinPolicy);
+        choiceRow(y, L"Pacing policy", L"Final RDTSCP wait window before firing.", kSpinLabels, s.spinPolicy, ActionKind::SetSpinPolicy);
     } else if (curTab == 3) {
-        // ---- Tab 3: Hotkeys -------------------------------------------------------
         const uint8_t bt = frame_.bindTarget;
         {
             const D2D1_RECT_F box = Rc(L, y, R, y + 54.0f);
@@ -1530,9 +1549,12 @@ inline void UiRenderer::DrawSettingsView(const D2D1_RECT_F& panel) noexcept {
             Stroke(box, 8.0f, theme::Line, 1.0f, 0.80f);
             Text(L"Global pause / resume", gpu_.fBodyStrong, Rc(L + 14.0f, y + 6.0f, R - 300.0f, y + 26.0f), theme::Text);
             Text(L"Pause or resume all automation anytime.", gpu_.fSmall, Rc(L + 14.0f, y + 26.0f, R - 300.0f, y + 46.0f), theme::Faint);
-            KeyChip(Rc(R - 294.0f, y + 11.0f, R - 154.0f, y + 43.0f), s.pauseHotkeyVk, act::SetBindPauseVk, bt == 24U);
-            Button(Rc(R - 146.0f, y + 13.0f, R - 82.0f, y + 41.0f), L"Reset F8", act::SetResetPauseVk, BtnStyle::Ghost, gpu_.fSmall);
-            Button(Rc(R - 76.0f, y + 13.0f, R - 12.0f, y + 41.0f), L"Clear", act::SetClearPauseVk, BtnStyle::Ghost, gpu_.fSmall);
+            KeyChip(Rc(R - 294.0f, y + 11.0f, R - 154.0f, y + 43.0f), s.pauseHotkeyVk,
+                    UiAction{ ActionKind::SetBindPauseVk }, bt == 24U);
+            Button(Rc(R - 146.0f, y + 13.0f, R - 82.0f, y + 41.0f), L"Reset F8",
+                   UiAction{ ActionKind::SetResetPauseVk }, BtnStyle::Ghost, gpu_.fSmall);
+            Button(Rc(R - 76.0f, y + 13.0f, R - 12.0f, y + 41.0f), L"Clear",
+                   UiAction{ ActionKind::SetClearPauseVk }, BtnStyle::Ghost, gpu_.fSmall);
             y += 62.0f;
         }
         {
@@ -1541,42 +1563,70 @@ inline void UiRenderer::DrawSettingsView(const D2D1_RECT_F& panel) noexcept {
             Stroke(box, 8.0f, theme::Line, 1.0f, 0.80f);
             Text(L"Global Stop All", gpu_.fBodyStrong, Rc(L + 14.0f, y + 6.0f, R - 230.0f, y + 26.0f), theme::Text);
             Text(L"Stop all active outputs and release held keys.", gpu_.fSmall, Rc(L + 14.0f, y + 26.0f, R - 230.0f, y + 46.0f), theme::Faint);
-            KeyChip(Rc(R - 224.0f, y + 11.0f, R - 84.0f, y + 43.0f), s.stopAllHotkeyVk, act::SetBindStopAllVk, bt == 25U);
-            Button(Rc(R - 76.0f, y + 13.0f, R - 12.0f, y + 41.0f), L"Clear", act::SetClearStopAllVk, BtnStyle::Ghost, gpu_.fSmall);
+            KeyChip(Rc(R - 224.0f, y + 11.0f, R - 84.0f, y + 43.0f), s.stopAllHotkeyVk,
+                    UiAction{ ActionKind::SetBindStopAllVk }, bt == 25U);
+            Button(Rc(R - 76.0f, y + 13.0f, R - 12.0f, y + 41.0f), L"Clear",
+                   UiAction{ ActionKind::SetClearStopAllVk }, BtnStyle::Ghost, gpu_.fSmall);
             y += 62.0f;
         }
-        toggleRow(y, L"Emergency panic chord (Left Ctrl + Right Ctrl + Esc)", L"Immediately stop automation and release all outputs.", s.panicChordEnabled, act::SetTogglePanic);
-        toggleRow(y, L"Stop on Windows lock", L"Stop active macros and workflows when the session locks.", s.stopOnSessionLock, act::SetToggleSessionLock);
-        toggleRow(y, L"Suppress triggers while typing in Mask", L"Prevent triggers while editing text or numbers in Mask.", s.suppressWhileTypingInApp, act::SetToggleSuppressType);
-        toggleRow(y, L"Sound feedback", L"Play a subtle tone on pause, resume, or emergency stop.", s.soundFeedback, act::SetToggleSound);
+        toggleRow(y, L"Emergency panic chord (Left Ctrl + Right Ctrl + Esc)", L"Immediately stop automation and release all outputs.", s.panicChordEnabled, ActionKind::SetTogglePanic);
+        toggleRow(y, L"Stop on Windows lock", L"Stop active autoclickers and workflows when the session locks.", s.stopOnSessionLock, ActionKind::SetToggleSessionLock);
+        toggleRow(y, L"Suppress triggers while typing in Mask", L"Prevent triggers while editing text or numbers in Mask.", s.suppressWhileTypingInApp, ActionKind::SetToggleSuppressType);
+        toggleRow(y, L"Sound feedback", L"Play a subtle tone on pause, resume, or emergency stop.", s.soundFeedback, ActionKind::SetToggleSound);
     } else {
         // ---- Tab 4: Hardware & Profiles -------------------------------------------
         const float bottomLimit = panel.bottom - 10.0f;
 
-        // Card 1: Profile Bank Switcher + Data Folder + Reset All
+        // Card 1: Profile Bank Switcher + Export JSON + Import JSON + Data Folder + Reset All
         {
-            const D2D1_RECT_F bankCard = Rc(L, y, R, y + 48.0f);
+            const float availW = R - L;
+            const bool twoRow = (availW < 700.0f);
+            const D2D1_RECT_F bankCard = Rc(L, y, R, y + (twoRow ? 82.0f : 48.0f));
             Fill(bankCard, 8.0f, theme::Inset, 0.82f);
             Stroke(bankCard, 8.0f, theme::Line);
-            Text(L"Profile bank", gpu_.fBodyStrong, Rc(L + 12.0f, y, L + 104.0f, y + 48.0f), theme::Text);
-            float bx = L + 108.0f;
+
+            Text(L"Profile bank", gpu_.fBodyStrong, Rc(L + 12.0f, y + 10.0f, L + 104.0f, y + 38.0f), theme::Text);
+            float bx = L + 106.0f;
             for (int b = 0; b < 3; ++b) {
                 wchar_t bl[16]{};
                 std::swprintf(bl, std::size(bl), L"Bank %d", b + 1);
-                Button(RcW(bx, y + 10.0f, 68.0f, 28.0f), bl, act::SetProfileBank + b,
+                Button(RcW(bx, y + 10.0f, 64.0f, 28.0f), bl,
+                       UiAction{ ActionKind::SetProfileBank, static_cast<int16_t>(b) },
                        s.activeProfileBank == static_cast<uint8_t>(b) ? BtnStyle::ChipOn : BtnStyle::Chip, gpu_.fSmall);
-                bx += 74.0f;
+                bx += 69.0f;
             }
-            Button(Rc(R - 230.0f, y + 10.0f, R - 110.0f, y + 38.0f), L"Data Folder", act::SetOpenDataFolder, BtnStyle::Secondary, gpu_.fSmall);
-            Button(Rc(R - 102.0f, y + 10.0f, R - 10.0f, y + 38.0f),
+
+            const float actY = twoRow ? (y + 44.0f) : (y + 10.0f);
+            if (twoRow) {
+                Text(L"JSON backup & storage", gpu_.fSmall, Rc(L + 12.0f, actY, R - 388.0f, actY + 28.0f), theme::Faint);
+            }
+            float rxBtn = R - 10.0f;
+            const float resetW = 86.0f;
+            Button(Rc(rxBtn - resetW, actY, rxBtn, actY + 28.0f),
                    u.pendingResetConfirm ? L"Confirm?" : L"Reset All",
-                   act::SetResetAll, BtnStyle::Danger, gpu_.fSmall);
+                   UiAction{ ActionKind::SetResetAll }, BtnStyle::Danger, gpu_.fSmall);
+            rxBtn -= resetW + 6.0f;
+
+            const float folderW = 94.0f;
+            Button(Rc(rxBtn - folderW, actY, rxBtn, actY + 28.0f), L"Data Folder",
+                   UiAction{ ActionKind::SetOpenDataFolder }, BtnStyle::Secondary, gpu_.fSmall);
+            rxBtn -= folderW + 6.0f;
+
+            const float impW = 92.0f;
+            Button(Rc(rxBtn - impW, actY, rxBtn, actY + 28.0f), L"Import JSON",
+                   UiAction{ ActionKind::ImportProfileJson }, BtnStyle::Secondary, gpu_.fSmall);
+            rxBtn -= impW + 6.0f;
+
+            const float expW = 92.0f;
+            Button(Rc(rxBtn - expW, actY, rxBtn, actY + 28.0f), L"Export JSON",
+                   UiAction{ ActionKind::ExportProfileJson }, BtnStyle::Secondary, gpu_.fSmall);
+
             y = bankCard.bottom + 10.0f;
         }
 
         // Card 2: Virtual Mouse & Keyboard Device Identity Presets
         {
-            const D2D1_RECT_F idCard = Rc(L, y, R, y + 150.0f);
+            const D2D1_RECT_F idCard = Rc(L, y, R, y + 148.0f);
             GlassCard(idCard, 9.0f, true, false, theme::GlassBorder, ColSignal(), 0.14f);
             const float cL = L + 12.0f;
             const float cR = R - 12.0f;
@@ -1599,8 +1649,8 @@ inline void UiRenderer::DrawSettingsView(const D2D1_RECT_F& panel) noexcept {
             Text(busBadge, gpu_.fSmall, Rc(cL + 210.0f, idCard.top + 8.0f, cR, idCard.top + 28.0f), badgeColor, DWRITE_TEXT_ALIGNMENT_TRAILING);
 
             const float colW = (cR - cL - 12.0f) * 0.5f;
-            auto pill = [&](const D2D1_RECT_F& pr, const wchar_t* lbl, bool active, int action) noexcept {
-                const bool hov = Hovered(action);
+            auto pill = [&](const D2D1_RECT_F& pr, const wchar_t* lbl, bool active, UiAction actId) noexcept {
+                const bool hov = Hovered(actId);
                 if (active) {
                     Fill(pr, 5.0f, ColSignal(), 0.16f);
                     Stroke(pr, 5.0f, ColSignal(), 1.0f, 0.85f);
@@ -1612,23 +1662,25 @@ inline void UiRenderer::DrawSettingsView(const D2D1_RECT_F& panel) noexcept {
                 }
                 Text(lbl, active ? gpu_.fBodyStrong : gpu_.fSmall, Rc(pr.left + 22.0f, pr.top, pr.right - 6.0f, pr.bottom),
                      active ? ColSignalHi() : (hov ? theme::Text : theme::Muted));
-                Hit(pr, action);
+                Hit(pr, actId);
             };
 
             const float topP = idCard.top + 34.0f;
             for (int i = 0; i < kMouseProfileCount; ++i) {
-                pill(RcW(cL, topP + static_cast<float>(i) * 28.0f, colW, 24.0f), kMouseProfiles[i].label,
-                     std::wcscmp(u.mouseProfileId, kMouseProfiles[i].id) == 0, act::SelectMouseProfile + i);
+                pill(RcW(cL, topP + static_cast<float>(i) * 27.5f, colW, 24.0f), kMouseProfiles[i].label,
+                     std::wcscmp(u.mouseProfileId, kMouseProfiles[i].id) == 0,
+                     UiAction{ ActionKind::SelectMouseProfile, static_cast<int16_t>(i) });
             }
             for (int i = 0; i < kKbProfileCount; ++i) {
-                pill(RcW(cL + colW + 12.0f, topP + static_cast<float>(i) * 28.0f, colW, 24.0f), kKbProfiles[i].label,
-                     std::wcscmp(u.keyboardProfileId, kKbProfiles[i].id) == 0, act::SelectKbProfile + i);
+                pill(RcW(cL + colW + 12.0f, topP + static_cast<float>(i) * 27.5f, colW, 24.0f), kKbProfiles[i].label,
+                     std::wcscmp(u.keyboardProfileId, kKbProfiles[i].id) == 0,
+                     UiAction{ ActionKind::SelectKbProfile, static_cast<int16_t>(i) });
             }
             y = idCard.bottom + 10.0f;
         }
 
         // Card 3: Live Device Telemetry & Connected Monitors + Timing Diagnostics
-        const float remH = std::max(210.0f, bottomLimit - y);
+        const float remH = std::max(200.0f, bottomLimit - y);
         const D2D1_RECT_F diagCard = Rc(L, y, R, y + remH);
         GlassCard(diagCard, 9.0f, true, false, theme::GlassBorder, ColSignal(), 0.14f);
 
@@ -1649,7 +1701,7 @@ inline void UiRenderer::DrawSettingsView(const D2D1_RECT_F& panel) noexcept {
             Text(sub, gpu_.fMini, Rc(tr.left + 8.0f, tr.top + 36.0f, tr.right - 6.0f, tr.bottom - 3.0f), theme::Muted);
         };
 
-        const bool giActive = g_SharedState.gameInputConnected.load(std::memory_order_relaxed);
+        const bool giActive = u.SharedState().gameInputConnected.load(std::memory_order_relaxed);
         const int reportedDevs = std::max<int>(u.physicalDeviceCount, static_cast<int>(snap.gameInputDeviceCount));
         wchar_t s0[44]{}, p50[32]{}, p99[44]{}, tsc[36]{}, evP[32]{}, evS[36]{};
         std::swprintf(s0, std::size(s0), L"%d devices \u2022 %d screens", reportedDevs, u.monitorCount);
@@ -1667,7 +1719,7 @@ inline void UiRenderer::DrawSettingsView(const D2D1_RECT_F& panel) noexcept {
         tile(3, L"Reports sent", evP, theme::Text, evS);
 
         const float botY = tY + 62.0f;
-        const float botH = std::max(100.0f, diagCard.bottom - botY - 10.0f);
+        const float botH = std::max(96.0f, diagCard.bottom - botY - 10.0f);
         const float splitW = (innerW - 10.0f) * 0.5f;
 
         const D2D1_RECT_F histR = RcW(cL, botY, splitW, botH);
@@ -1700,7 +1752,8 @@ inline void UiRenderer::DrawSettingsView(const D2D1_RECT_F& panel) noexcept {
         Fill(devR, 6.0f, theme::Panel, 0.85f);
         Stroke(devR, 6.0f, theme::Line);
         Text(L"Devices & Monitors", gpu_.fBodyStrong, Rc(devR.left + 10.0f, devR.top + 6.0f, devR.right - 66.0f, devR.top + 24.0f), theme::Text);
-        Button(Rc(devR.right - 34.0f, devR.top + 5.0f, devR.right - 6.0f, devR.top + 25.0f), L"\u21BB", act::SetRefreshHw, BtnStyle::Ghost, gpu_.fBodyStrong);
+        Button(Rc(devR.right - 34.0f, devR.top + 5.0f, devR.right - 6.0f, devR.top + 25.0f), L"\u21BB",
+               UiAction{ ActionKind::SetRefreshHw }, BtnStyle::Ghost, gpu_.fBodyStrong);
 
         const float reserveMonH = static_cast<float>(std::clamp(u.monitorCount, 1, 2)) * 16.0f + 4.0f;
         float dy = devR.top + 27.0f;
@@ -1709,16 +1762,16 @@ inline void UiRenderer::DrawSettingsView(const D2D1_RECT_F& panel) noexcept {
             dy += 17.0f;
         } else {
             for (int i = 0; i < u.physicalDeviceCount && dy + 16.0f <= devR.bottom - reserveMonH; ++i) {
-                const auto& d = u.physicalDevices[i];
-                wchar_t line[80]{};
-                std::swprintf(line, std::size(line), L"\u2022 %ls (%04X:%04X)", d.displayName,
+                const auto& d = u.physicalDevices[static_cast<size_t>(i)];
+                wchar_t devLine[80]{};
+                std::swprintf(devLine, std::size(devLine), L"\u2022 %ls (%04X:%04X)", d.displayName,
                               static_cast<unsigned>(d.vendorId), static_cast<unsigned>(d.productId));
-                Text(line, gpu_.fMini, Rc(devR.left + 10.0f, dy, devR.right - 10.0f, dy + 16.0f), theme::Muted);
+                Text(devLine, gpu_.fMini, Rc(devR.left + 10.0f, dy, devR.right - 10.0f, dy + 16.0f), theme::Muted);
                 dy += 16.0f;
             }
         }
         for (int m = 0; m < u.monitorCount && dy + 16.0f <= devR.bottom - 4.0f; ++m) {
-            const auto& mn = u.monitors[m];
+            const auto& mn = u.monitors[static_cast<size_t>(m)];
             wchar_t ml[80]{};
             std::swprintf(ml, std::size(ml), L"Mon %d: %dx%d @ %u DPI%ls", m + 1,
                           static_cast<int>(mn.right - mn.left), static_cast<int>(mn.bottom - mn.top),
@@ -1733,18 +1786,18 @@ inline void UiRenderer::DrawSettingsView(const D2D1_RECT_F& panel) noexcept {
 //  5. Clean Animated `+ New` Creation Picker Modal
 // =====================================================================================
 
-inline void UiRenderer::DrawNewPickerModal(float W, float H, float openT) noexcept {
+void UiRenderer::DrawNewPickerModal(float W, float H, float openT) noexcept {
     const auto& u = Ui();
     const auto& a = Anim();
     const D2D1_RECT_F full = Rc(0.0f, 0.0f, W, H);
     Fill(full, 0.0f, theme::Window, 0.68f * openT);
     if (u.showNewPicker) {
-        Hit(full, act::NewPickerBackdrop);
+        Hit(full, UiAction{ ActionKind::NewPickerBackdrop });
     }
 
     const float scale = 0.92f + 0.08f * openT;
     const float slideY = (1.0f - openT) * 14.0f;
-    const float baseW = std::min(520.0f, W - 48.0f);
+    const float baseW = std::min(560.0f, W - 48.0f);
     const float baseH = 264.0f;
     const float mw = baseW * scale;
     const float mh = baseH * scale;
@@ -1761,7 +1814,7 @@ inline void UiRenderer::DrawNewPickerModal(float W, float H, float openT) noexce
                        0.26f * openT, a.cursorX.value, a.cursorY.value, false, ColSignal());
 
     if (u.showNewPicker) {
-        Hit(modal, act::ModalSurface);
+        Hit(modal, UiAction{ ActionKind::ModalSurface });
     }
 
     const float pad = 20.0f * scale;
@@ -1769,20 +1822,20 @@ inline void UiRenderer::DrawNewPickerModal(float W, float H, float openT) noexce
          theme::Text, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, openT);
 
     Button(Rc(modal.right - pad - 28.0f, modal.top + 16.0f * scale, modal.right - pad, modal.top + 44.0f * scale),
-           L"\u00D7", act::CloseNewPicker, BtnStyle::Ghost, gpu_.fHeading, openT);
+           L"\u00D7", UiAction{ ActionKind::CloseNewPicker }, BtnStyle::Ghost, gpu_.fHeading, openT);
 
     struct PickerCardDef {
         const wchar_t* badge;
         const wchar_t* title;
         const wchar_t* desc;
         UINT32         color;
-        int            action;
+        UiAction       action;
     };
     const PickerCardDef cards[4] = {
-        { L"M", L"Macro",       L"Rapid click, toggle, burst or snap-tap",  ColSignal(),    act::CreateMacro    },
-        { L"T", L"Trigger Bot", L"React automatically to screen colors",    theme::Ok,      act::CreateTrigger  },
-        { L"S", L"Sequence",    L"Multi-step workflow up to 128 actions",   ColSecondary(), act::CreateSequence },
-        { L"R", L"Remap",       L"Rebind keys by device, screen or layer",  theme::Violet,  act::CreateRemap    },
+        { L"A", L"Autoclicker", L"Rapid clicker with hold, toggle or burst", ColSignal(),    UiAction{ ActionKind::CreateAutoclicker } },
+        { L"T", L"Trigger Bot", L"React automatically to screen colors",     theme::Ok,      UiAction{ ActionKind::CreateTrigger     } },
+        { L"S", L"Sequence",    L"Multi-step workflow up to 128 actions",           ColSecondary(), UiAction{ ActionKind::CreateSequence    } },
+        { L"R", L"Remap",       L"Rebind keys by device, screen or layer",          theme::Violet,  UiAction{ ActionKind::CreateRemap       } },
     };
 
     const float gridTop = modal.top + 56.0f * scale;
@@ -1795,7 +1848,7 @@ inline void UiRenderer::DrawNewPickerModal(float W, float H, float openT) noexce
         const int col = i % 2;
         const D2D1_RECT_F cr = RcW(modal.left + pad + static_cast<float>(col) * (cw + gap),
                                    gridTop + static_cast<float>(row) * (ch + gap), cw, ch);
-        const D2D1_RECT_F sr = a.ApplySqueeze(cr, cards[i].action);
+        const D2D1_RECT_F sr = a.ApplySqueeze(cr, EncodeUiActionKey(cards[i].action));
         const bool hov = Hovered(cards[i].action);
 
         gpu_.FillGlassCard(sr, 9.0f,

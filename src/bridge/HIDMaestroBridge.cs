@@ -10,8 +10,28 @@ using HIDMaestro;
 namespace Mask.Bridge
 {
     /// <summary>
+    /// Exact 48-byte unmanaged batch item matching C++ `mask::core::OutputBatchItem`.
+    /// </summary>
+    [StructLayout(LayoutKind.Explicit, Size = 48)]
+    public unsafe struct HMOutputBatchItem
+    {
+        [FieldOffset(0)]  public byte Kind;          // 0 = Mouse, 1 = Keyboard
+        [FieldOffset(1)]  public byte ModifiersMask;
+        [FieldOffset(2)]  public byte KeyCount;      // 0..6
+        [FieldOffset(3)]  public byte Reserved;
+        [FieldOffset(4)]  public uint ButtonsMask;
+        [FieldOffset(8)]  public int Dx;
+        [FieldOffset(12)] public int Dy;
+        [FieldOffset(16)] public int Wheel;
+        [FieldOffset(20)] public int Pan;
+        [FieldOffset(24)] public fixed byte HidKeyCodes[6];
+        [FieldOffset(32)] public ulong EnqueueTsc;
+        [FieldOffset(40)] public ulong BenchToken;
+    }
+
+    /// <summary>
     /// Native-Callable Unmanaged Entry Points bridging C++23 MaskEngine directly to HIDMaestro v2.1.0.
-    /// Zero runtime heap allocations on the real-time SubmitMouse / SubmitKeyboard hot paths.
+    /// Zero runtime heap allocations on the real-time SubmitMouse / SubmitKeyboard / SubmitBatch hot paths.
     /// </summary>
     public static unsafe class NativeExports
     {
@@ -27,6 +47,7 @@ namespace Mask.Bridge
 
         // Pre-allocated 6-key rollover buffer for zero-allocation Span slicing on the hot path
         private static readonly HMKey[] s_keyRolloverBuffer = new HMKey[6];
+        private static volatile uint s_dryRunSink;
 
         private static volatile bool s_initialized;
         private static volatile bool s_driverInstalledCached;
@@ -528,6 +549,199 @@ namespace Mask.Bridge
                 if (locked)
                 {
                     ReleaseSpinGuard(ref s_keyboardGuard);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Submits a chronological batch of mouse and keyboard reports in one unmanaged call,
+        /// acquiring each required spin guard at most once in canonical order (mouse -> keyboard).
+        /// Zero heap allocations. Returns the count of failed items (0 = all succeeded).
+        /// </summary>
+        [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        public static int HMBridge_SubmitBatch(HMOutputBatchItem* items, int count, int dryRun)
+        {
+            if (count <= 0)
+            {
+                return count == 0 ? 0 : 1;
+            }
+            if (items == null)
+            {
+                return count;
+            }
+
+            bool isDryRun = (dryRun != 0);
+            bool needMouse = false;
+            bool needKb = false;
+            for (int i = 0; i < count; ++i)
+            {
+                byte kind = items[i].Kind;
+                if (kind == 0)
+                {
+                    needMouse = true;
+                }
+                else if (kind == 1)
+                {
+                    needKb = true;
+                }
+                if (needMouse && needKb)
+                {
+                    break;
+                }
+            }
+
+            if (!needMouse && !needKb)
+            {
+                return count;
+            }
+            if (!isDryRun && !s_initialized)
+            {
+                return count;
+            }
+
+            bool mouseLocked = false;
+            bool kbLocked = false;
+            int failedCount = 0;
+            uint dryRunAcc = 0;
+
+            try
+            {
+                if (needMouse)
+                {
+                    AcquireSpinGuard(ref s_mouseGuard);
+                    mouseLocked = true;
+                }
+                if (needKb)
+                {
+                    AcquireSpinGuard(ref s_keyboardGuard);
+                    kbLocked = true;
+                }
+
+                bool liveInit = s_initialized;
+                HMController? mouse = needMouse ? Volatile.Read(ref s_mouseController) : null;
+                HMController? kb = needKb ? Volatile.Read(ref s_keyboardController) : null;
+                bool mouseFaultedInBatch = false;
+                bool kbFaultedInBatch = false;
+
+                for (int i = 0; i < count; ++i)
+                {
+                    HMOutputBatchItem* item = items + i;
+                    byte kind = item->Kind;
+                    if (kind == 0)
+                    {
+                        HMMouseState state = new HMMouseState
+                        {
+                            Buttons = (HMMouseButtons)item->ButtonsMask,
+                            X = item->Dx,
+                            Y = item->Dy,
+                            Wheel = item->Wheel,
+                            Pan = item->Pan
+                        };
+
+                        if (isDryRun)
+                        {
+                            dryRunAcc ^= (uint)state.Buttons ^ (uint)state.X ^ (uint)state.Y ^ (uint)state.Wheel ^ (uint)state.Pan;
+                            dryRunAcc ^= (uint)(item->BenchToken ^ (item->BenchToken >> 32));
+                            if (!liveInit || mouse == null)
+                            {
+                                dryRunAcc ^= 0x1001U;
+                            }
+                            continue;
+                        }
+
+                        if (!liveInit || mouse == null || mouseFaultedInBatch)
+                        {
+                            ++failedCount;
+                            continue;
+                        }
+
+                        try
+                        {
+                            mouse.SubmitMouse(in state);
+                        }
+                        catch
+                        {
+                            s_mouseFaulted = true;
+                            mouseFaultedInBatch = true;
+                            ++failedCount;
+                        }
+                    }
+                    else if (kind == 1)
+                    {
+                        HMKeyModifiers mods = (HMKeyModifiers)item->ModifiersMask;
+                        int clampedCount = Math.Clamp((int)item->KeyCount, 0, 6);
+                        ReadOnlySpan<HMKey> span;
+                        if (clampedCount == 0)
+                        {
+                            span = ReadOnlySpan<HMKey>.Empty;
+                        }
+                        else
+                        {
+                            for (int k = 0; k < clampedCount; ++k)
+                            {
+                                s_keyRolloverBuffer[k] = (HMKey)item->HidKeyCodes[k];
+                            }
+                            span = new ReadOnlySpan<HMKey>(s_keyRolloverBuffer, 0, clampedCount);
+                        }
+
+                        if (isDryRun)
+                        {
+                            dryRunAcc ^= (uint)mods;
+                            for (int k = 0; k < span.Length; ++k)
+                            {
+                                dryRunAcc ^= (uint)span[k] << ((k & 3) * 8);
+                            }
+                            dryRunAcc ^= (uint)(item->BenchToken ^ (item->BenchToken >> 32));
+                            if (!liveInit || kb == null)
+                            {
+                                dryRunAcc ^= 0x2002U;
+                            }
+                            continue;
+                        }
+
+                        if (!liveInit || kb == null || kbFaultedInBatch)
+                        {
+                            ++failedCount;
+                            continue;
+                        }
+
+                        try
+                        {
+                            kb.SubmitKeyboard(mods, span);
+                        }
+                        catch
+                        {
+                            s_keyboardFaulted = true;
+                            kbFaultedInBatch = true;
+                            ++failedCount;
+                        }
+                    }
+                    else
+                    {
+                        ++failedCount;
+                    }
+                }
+
+                if (isDryRun)
+                {
+                    s_dryRunSink = dryRunAcc;
+                }
+                return failedCount;
+            }
+            catch
+            {
+                return failedCount > 0 ? failedCount : count;
+            }
+            finally
+            {
+                if (kbLocked)
+                {
+                    ReleaseSpinGuard(ref s_keyboardGuard);
+                }
+                if (mouseLocked)
+                {
+                    ReleaseSpinGuard(ref s_mouseGuard);
                 }
             }
         }

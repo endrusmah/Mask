@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.24)
-project(MaskDeterministicEngine VERSION 2.3.0 LANGUAGES CXX)
-enable_language(RC)
+project(MaskDeterministicEngine VERSION 2.4.0 LANGUAGES CXX RC)
+
+if(NOT MSVC)
+    message(FATAL_ERROR "MaskDeterministicEngine supports only Windows x64 with MSVC.")
+endif()
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,6 +18,28 @@ find_program(DOTNET_EXECUTABLE dotnet REQUIRED)
 
 add_executable(MaskEngine
     src/main.cpp
+    src/app_window.cpp
+    src/app_commands.cpp
+    src/app_tray.cpp
+    src/app_settings_io.cpp
+    src/app_engine_threads.cpp
+    src/app_selftest.cpp
+    src/app_model.cpp
+    src/app_settings.cpp
+    src/app_view.cpp
+    src/app_view_editors.cpp
+    src/profile_json.cpp
+    src/ui_anim.cpp
+    src/ui_gpu_renderer.cpp
+    src/timing_engine.cpp
+    src/hidmaestro_bridge.cpp
+    src/input_pipeline.cpp
+    src/macro_runtime.cpp
+    src/macro_runtime_avx2.cpp
+    src/pixel_trigger_engine.cpp
+    src/complex_sequence_engine.cpp
+    src/remap_engine.cpp
+    src/watchdog.cpp
     resources/mask.rc
 )
 
@@ -31,44 +56,36 @@ target_compile_definitions(MaskEngine PRIVATE
     _WIN32_WINNT=0x0A00
 )
 
-if(MSVC)
-    target_compile_options(MaskEngine PRIVATE
-        /utf-8       # source and execution character sets are UTF-8, whatever the PC's code page
-        /W4
-        /wd4324
-        /WX-
-        /permissive-
-        /Zc:__cplusplus
-        /EHsc
-        /arch:AVX2
-        $<$<CONFIG:Release>:/O2 /Oi /Ot /GL /fp:fast /GS->
-        $<$<CONFIG:RelWithDebInfo>:/O2 /Oi /Ot /Zi /fp:fast>
-    )
-    target_link_options(MaskEngine PRIVATE
-        $<$<CONFIG:Release>:/LTCG /OPT:REF /OPT:ICF>
-        # GUI app: no console window next to the main window. main() stays the entry point, and
-        # `MaskEngine.exe --self-test` still prints to the terminal it was started from.
-        /SUBSYSTEM:WINDOWS
-        /ENTRY:mainCRTStartup
-    )
-else()
-    target_compile_options(MaskEngine PRIVATE
-        -Wall
-        -Wextra
-        -mavx2
-        -mbmi2
-        $<$<CONFIG:Release>:-O3 -flto -ffast-math>
-    )
-    target_link_options(MaskEngine PRIVATE
-        $<$<CONFIG:Release>:-flto>
-        -mwindows
-    )
-endif()
+target_compile_options(MaskEngine PRIVATE
+    /utf-8       # source and execution character sets are UTF-8, whatever the PC's code page
+    /W4
+    /wd4324
+    /WX-
+    /permissive-
+    /Zc:__cplusplus
+    /EHsc
+    $<$<CONFIG:Release>:/O2 /Oi /Ot /GL /fp:fast>
+    $<$<CONFIG:RelWithDebInfo>:/O2 /Oi /Ot /Zi /fp:fast>
+)
+
+# Isolate AVX2 codegen strictly to the CPUID-gated runtime kernel TU.
+set_source_files_properties(src/macro_runtime_avx2.cpp PROPERTIES
+    COMPILE_OPTIONS "/arch:AVX2"
+)
+
+target_link_options(MaskEngine PRIVATE
+    $<$<CONFIG:Release>:/LTCG /OPT:REF /OPT:ICF>
+    # GUI app: no console window next to the main window. main() stays the entry point, and
+    # `MaskEngine.exe --self-test` still prints to the terminal it was started from.
+    /SUBSYSTEM:WINDOWS
+    /ENTRY:mainCRTStartup
+)
 
 target_link_libraries(MaskEngine PRIVATE
     kernel32
     user32
     shell32
+    comdlg32
     advapi32
     ole32
     psapi
@@ -85,10 +102,12 @@ target_link_libraries(MaskEngine PRIVATE
     gameinput
 )
 
-# Build the Native-Callable C# Bridge (Mask.HIDMaestroBridge.dll) and copy HIDMaestro.Core.dll v2.1.0
-# directly alongside MaskEngine.exe on every build.
-add_custom_command(TARGET MaskEngine POST_BUILD
-    COMMAND "${DOTNET_EXECUTABLE}" build "${CMAKE_CURRENT_SOURCE_DIR}/src/bridge/Mask.HIDMaestroBridge.csproj"
+# Dependency-tracked incremental build for Mask.HIDMaestroBridge.dll and HIDMaestro.Core.dll staging.
+set(MASK_BRIDGE_STAMP "${CMAKE_CURRENT_BINARY_DIR}/bridge-$<CONFIG>.stamp")
+add_custom_command(
+    OUTPUT "${MASK_BRIDGE_STAMP}"
+    COMMAND ${CMAKE_COMMAND} -E env --unset=LIB
+            "${DOTNET_EXECUTABLE}" build "${CMAKE_CURRENT_SOURCE_DIR}/src/bridge/Mask.HIDMaestroBridge.csproj"
             -c Release
             -o "$<TARGET_FILE_DIR:MaskEngine>"
             --nologo
@@ -96,5 +115,13 @@ add_custom_command(TARGET MaskEngine POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/lib/HIDMaestro.Core.dll"
             "$<TARGET_FILE_DIR:MaskEngine>/HIDMaestro.Core.dll"
-    COMMENT "Building Mask.HIDMaestroBridge.dll and staging HIDMaestro.Core.dll v2.1.0..."
+    COMMAND ${CMAKE_COMMAND} -E touch "${MASK_BRIDGE_STAMP}"
+    DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/bridge/Mask.HIDMaestroBridge.csproj"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/bridge/HIDMaestroBridge.cs"
+        "${CMAKE_CURRENT_SOURCE_DIR}/lib/HIDMaestro.Core.dll"
+    COMMENT "Building Mask.HIDMaestroBridge.dll (only when bridge files change)..."
+    VERBATIM
 )
+add_custom_target(MaskBridge ALL DEPENDS "${MASK_BRIDGE_STAMP}")
+add_dependencies(MaskEngine MaskBridge)

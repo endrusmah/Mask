@@ -17,19 +17,19 @@ inline constexpr size_t kMaxComplexSteps = 128;
 inline constexpr size_t kMaxColorTriggers = 8;
 inline constexpr size_t kMaxRemapRules = 32;
 inline constexpr size_t kMaxRemapLayers = 4;
-inline constexpr uint64_t kMinimumPulseFloorNs = 50'000ULL; // 50 microseconds floor guard
+inline constexpr uint64_t kMinimumPulseFloorNs = 0ULL; // Unrestricted: no artificial minimum pulse floor
 inline constexpr uint16_t kVkLeftButton   = 0x0001U;        // VK_LBUTTON (avoids <windows.h> dependency here)
 inline constexpr uint16_t kVkDefaultPause = 0x0077U;        // VK_F8
 inline constexpr uint16_t kVkWheelUp      = 0x00F1U;        // Output-only pseudo-VK for mouse wheel up tick
 inline constexpr uint16_t kVkWheelDown    = 0x00F2U;        // Output-only pseudo-VK for mouse wheel down tick
 
-// A release ("recovery") time of exactly 0 means a true 100% duty cycle: the output is pressed once and
-// stays down, with no release events at all, until the macro stops. Any other value is floored to 50 us.
+// Timing values are passed through unmodified without any artificial CPS/ms or microsecond floor clamping.
+// A release ("recovery") time of 0 is preserved cleanly for caller-defined 0 ms or full-duty behavior.
 [[nodiscard]] constexpr uint64_t ClampPressNs(uint64_t ns) noexcept {
-    return ns < kMinimumPulseFloorNs ? kMinimumPulseFloorNs : ns;
+    return ns;
 }
 [[nodiscard]] constexpr uint64_t ClampReleaseNs(uint64_t ns) noexcept {
-    return ns == 0ULL ? 0ULL : (ns < kMinimumPulseFloorNs ? kMinimumPulseFloorNs : ns);
+    return ns;
 }
 
 // Why the watchdog last forced everything to stop (shown in the UI).
@@ -227,6 +227,48 @@ struct ComplexSequenceConfig {
 };
 
 static_assert(std::is_trivially_copyable_v<ComplexSequenceConfig>, "ComplexSequenceConfig must be trivially copyable.");
+
+inline constexpr uint8_t kSeqFlagUntrustedImport = 0x01U;
+
+[[nodiscard]] constexpr bool IsSequenceUntrustedImport(const ComplexSequenceConfig& s) noexcept {
+    return (s.reserved[0] & kSeqFlagUntrustedImport) != 0U;
+}
+
+constexpr void SetSequenceUntrustedImport(ComplexSequenceConfig& s, bool untrusted) noexcept {
+    if (untrusted) {
+        s.reserved[0] = static_cast<uint8_t>(s.reserved[0] | kSeqFlagUntrustedImport);
+    } else {
+        s.reserved[0] = static_cast<uint8_t>(s.reserved[0] & ~kSeqFlagUntrustedImport);
+    }
+}
+
+// =====================================================================================
+//  Batched Hardware Output Contract (matches C# HMOutputBatchItem 48-byte unmanaged layout)
+// =====================================================================================
+
+enum class OutputBatchKind : uint8_t {
+    Mouse    = 0,
+    Keyboard = 1
+};
+
+struct alignas(8) OutputBatchItem {
+    uint8_t  kind{0};          // offset 0: OutputBatchKind
+    uint8_t  modifiersMask{0}; // offset 1
+    uint8_t  keyCount{0};      // offset 2 (0..6)
+    uint8_t  reserved{0};      // offset 3
+    uint32_t buttonsMask{0};   // offset 4
+    int32_t  dx{0};            // offset 8
+    int32_t  dy{0};            // offset 12
+    int32_t  wheel{0};         // offset 16
+    int32_t  pan{0};           // offset 20
+    uint8_t  hidKeyCodes[6]{}; // offset 24
+    uint8_t  pad[2]{0, 0};     // offset 30
+    uint64_t enqueueTsc{0};    // offset 32 (for --bench E2E latency)
+    uint64_t benchToken{0};    // offset 40 (non-zero in --bench)
+};
+
+static_assert(sizeof(OutputBatchItem) == 48, "OutputBatchItem must be 48 bytes.");
+static_assert(std::is_trivially_copyable_v<OutputBatchItem>, "OutputBatchItem must be trivially copyable.");
 
 // =====================================================================================
 //  Pixel / Color Triggers (Ring-3 DXGI/GDI Screen Color Automation)
@@ -573,12 +615,25 @@ struct alignas(kCacheLineSize) EngineSharedState {
     alignas(kCacheLineSize) std::array<std::atomic<uint8_t>, 256> syntheticHeldState{};
     alignas(kCacheLineSize) std::array<std::atomic<uint64_t>, 4> syntheticKeyBits{};
 
-    // Lock-Free Queues (MPSC for multi-producer input/aux feeds; SPSC for UI->Engine macro config sync)
+    // Lock-Free Queues (MPSC for multi-producer input/aux feeds; SPSC for UI->Engine config & Engine->Bridge output batching)
     MPSCQueue<InputTriggerEvent, 4096> inputEventQueue{};
     SPSCQueue<MacroConfig, 256>        uiCommandQueue{};
     MPSCQueue<AuxOutputCommand, 1024>  auxOutputQueue{};
+    SPSCQueue<OutputBatchItem, 4096>   outputBatchQueue{};
+
+    // Benchmark Instrumentation (--bench E2E latency & dry-run verification)
+    alignas(kCacheLineSize) std::atomic<bool> benchDryRunOutput{false};
+    std::atomic<uint64_t> benchLastCompleteTsc{0};
+    std::atomic<uint64_t> benchLastCompleteToken{0};
+    std::atomic<uint64_t> benchCompletedCount{0};
+    std::atomic<uint64_t> benchTotalBatches{0};
 
     EngineSharedState() noexcept {
+        benchDryRunOutput.store(false, std::memory_order_relaxed);
+        benchLastCompleteTsc.store(0, std::memory_order_relaxed);
+        benchLastCompleteToken.store(0, std::memory_order_relaxed);
+        benchCompletedCount.store(0, std::memory_order_relaxed);
+        benchTotalBatches.store(0, std::memory_order_relaxed);
         for (size_t i = 0; i < 256; ++i) {
             physicalKeyState[i].store(0, std::memory_order_relaxed);
             syntheticHeldState[i].store(0, std::memory_order_relaxed);
